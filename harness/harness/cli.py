@@ -1139,6 +1139,149 @@ def install_upgrade():
 
 
 # =============================================================================
+# CREDENTIAL Commands
+# =============================================================================
+
+@app.command("scan-tokens")
+def scan_tokens_cmd(
+    save: bool = typer.Option(False, "--save", "-s", help="Save first valid token to .env file"),
+    env_file: Optional[str] = typer.Option(None, "--env-file", "-e", help="Target .env file path (default: project .env)")
+):
+    """Scan local .env files for GitLab tokens and test them.
+
+    Searches multiple locations for GITLAB_TOKEN, GL_TOKEN, or GLAB_TOKEN:
+    - Project .env files
+    - Home directory .env files
+    - Sibling project directories
+    - Config directories
+
+    Each found token is tested against the GitLab API to verify:
+    - Token validity (authentication)
+    - Required scopes (api)
+    - Associated username
+
+    Examples:
+        harness scan-tokens              # Find and test all tokens
+        harness scan-tokens --save       # Save first valid token to .env
+        harness scan-tokens -s -e ~/.env # Save to specific file
+    """
+    from harness.bootstrap.credentials import CredentialDiscovery
+    from harness.config import HarnessConfig
+
+    # Use harness config to get proper project root
+    try:
+        config = HarnessConfig.load()
+        project_root = Path(config.repo_root)
+    except Exception:
+        project_root = Path.cwd()
+
+    discovery = CredentialDiscovery(project_root=project_root)
+    console.print("[bold]Scanning for GitLab tokens...[/bold]\n")
+
+    results = discovery.scan_and_test_gitlab_tokens()
+
+    if not results:
+        console.print("[yellow]No GitLab tokens found in any .env files.[/yellow]")
+        console.print("\n[dim]Checked locations:[/dim]")
+        for path in discovery._get_env_file_search_paths()[:10]:
+            console.print(f"[dim]  - {path}[/dim]")
+        raise typer.Exit(1)
+
+    # Display results in a table
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Variable")
+    table.add_column("Source")
+    table.add_column("Token")
+    table.add_column("Valid")
+    table.add_column("User")
+    table.add_column("Scopes")
+
+    first_valid = None
+    for r in results:
+        valid_str = "[green]✓[/green]" if r["valid"] else "[red]✗[/red]"
+        scopes_str = ", ".join(r["scopes"]) if r["scopes"] else r.get("error", "-")
+        user_str = r.get("username") or "-"
+        var_name = r.get("var_name") or "-"
+
+        # Truncate source path for display
+        source = r["source"]
+        if source.startswith("env:"):
+            source = "[env]"
+        elif len(source) > 30:
+            source = "..." + source[-27:]
+
+        table.add_row(
+            var_name[:25] + "..." if len(var_name) > 25 else var_name,
+            source,
+            r["token_prefix"],
+            valid_str,
+            user_str,
+            scopes_str[:20] + "..." if len(scopes_str) > 20 else scopes_str
+        )
+
+        if r["valid"] and first_valid is None:
+            first_valid = r
+
+    console.print(table)
+
+    # Summary
+    valid_count = sum(1 for r in results if r["valid"])
+    console.print(f"\n[bold]Found {len(results)} tokens, {valid_count} valid.[/bold]")
+
+    # Save if requested
+    if save and first_valid:
+        target_file = Path(env_file) if env_file else None
+
+        # Need to get the actual token value (not just prefix)
+        # Re-read from source
+        actual_token = None
+        var_to_find = first_valid.get("var_name")
+        token_prefix = first_valid["token_prefix"].replace("...", "")  # Get actual prefix
+
+        if first_valid["source"] == "[env]" or first_valid["source"].startswith("env:"):
+            # From environment
+            import os
+            actual_token = os.environ.get(var_to_find)
+        else:
+            # Read from file - need to handle 'export VAR=' format
+            import re
+            try:
+                with open(first_valid["source"]) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        # Handle both 'VAR=value' and 'export VAR=value'
+                        clean_line = line.replace("export ", "").strip()
+                        if "=" in clean_line:
+                            key, _, val = clean_line.partition("=")
+                            key = key.strip()
+                            val = val.strip().strip('"').strip("'")
+                            # Match by variable name or token prefix
+                            if (key == var_to_find or val.startswith(token_prefix)) and val:
+                                actual_token = val
+                                break
+            except Exception as e:
+                console.print(f"[dim]Error reading source file: {e}[/dim]")
+
+        if actual_token:
+            if discovery.save_credential_to_env("GITLAB_TOKEN", actual_token, target_file):
+                target_path = target_file or (discovery.project_root / ".env")
+                console.print(f"\n[green]Saved valid token to {target_path}[/green]")
+                console.print(f"[dim]Token from: {first_valid['var_name']} ({first_valid['username']})[/dim]")
+            else:
+                console.print("\n[red]Failed to save token to .env file[/red]")
+                raise typer.Exit(1)
+        else:
+            console.print("\n[red]Could not retrieve token value for saving[/red]")
+            console.print(f"[dim]Looking for var '{var_to_find}' with prefix '{token_prefix}' in {first_valid['source']}[/dim]")
+            raise typer.Exit(1)
+    elif save and not first_valid:
+        console.print("\n[yellow]No valid token found to save.[/yellow]")
+        raise typer.Exit(1)
+
+
+# =============================================================================
 # BOOTSTRAP Command
 # =============================================================================
 

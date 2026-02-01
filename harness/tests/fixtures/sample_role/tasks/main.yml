@@ -1,0 +1,23 @@
+---
+# Main tasks file for sample_role
+
+- name: Include credential setup
+  ansible.builtin.include_tasks: credentials.yml
+
+- name: Set up Windows features
+  ansible.windows.win_feature:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - Web-Server
+    - Web-WebServer
+
+- name: Configure IIS
+  ansible.builtin.import_tasks: iis_setup.yml
+  when: configure_iis | default(true)
+
+- name: Deploy application
+  ansible.builtin.include_tasks: deploy.yml
+  tags:
+    - deploy
+    - application

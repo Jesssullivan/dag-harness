@@ -13,6 +13,7 @@ class HOTLPhase(str, Enum):
     PLANNING = "planning"
     GAP_ANALYZING = "gap_analyzing"
     EXECUTING = "executing"
+    AGENT_EXECUTING = "agent_executing"  # Claude agent is running
     TESTING = "testing"
     NOTIFYING = "notifying"
     PAUSED = "paused"
@@ -66,6 +67,11 @@ class HOTLState(TypedDict, total=False):
     started_at: str
     config: dict[str, Any]
 
+    # Agent execution tracking
+    active_agent_sessions: list[str]  # Session IDs of active Claude agents
+    completed_agent_sessions: Annotated[list[str], operator.add]
+    pending_interventions: list[str]  # Session IDs needing human help
+
 
 def create_initial_state(
     max_iterations: int = 100,
@@ -101,5 +107,8 @@ def create_initial_state(
         stop_requested=False,
         session_id=str(uuid.uuid4()),
         started_at=datetime.utcnow().isoformat(),
-        config=config or {}
+        config=config or {},
+        active_agent_sessions=[],
+        completed_agent_sessions=[],
+        pending_interventions=[],
     )

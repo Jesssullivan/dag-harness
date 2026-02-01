@@ -513,6 +513,271 @@ def create_mcp_server(db_path: Optional[str] = None) -> FastMCP:
             "dependency_graph_valid": dep_validation.get("valid", False),
         }
 
+    # =========================================================================
+    # AGENT FEEDBACK TOOLS (for Claude Code subagents in HOTL mode)
+    # =========================================================================
+
+    @mcp.tool()
+    async def agent_report_progress(session_id: str, progress: str) -> dict[str, Any]:
+        """
+        Report progress from a running Claude Code subagent.
+
+        Used by subagents to communicate their current status and progress
+        to the HOTL supervisor.
+
+        Args:
+            session_id: The agent session ID (provided in environment)
+            progress: Progress message describing current status
+
+        Returns:
+            Acknowledgment with timestamp
+        """
+        with db.connection() as conn:
+            # Get existing progress
+            row = conn.execute(
+                "SELECT progress_json FROM agent_sessions WHERE id = ?",
+                (session_id,)
+            ).fetchone()
+
+            if not row:
+                return {"success": False, "error": f"Session not found: {session_id}"}
+
+            # Append new progress
+            existing = json.loads(row["progress_json"]) if row["progress_json"] else []
+            timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            existing.append(f"[{timestamp}] {progress}")
+
+            conn.execute(
+                "UPDATE agent_sessions SET progress_json = ? WHERE id = ?",
+                (json.dumps(existing), session_id)
+            )
+
+        return {
+            "success": True,
+            "timestamp": timestamp,
+            "session_id": session_id,
+        }
+
+    @mcp.tool()
+    async def agent_request_intervention(session_id: str, reason: str) -> dict[str, Any]:
+        """
+        Request human intervention from a running Claude Code subagent.
+
+        Used when the agent encounters a situation it cannot handle autonomously
+        and needs human guidance or approval.
+
+        Args:
+            session_id: The agent session ID
+            reason: Detailed explanation of why intervention is needed
+
+        Returns:
+            Acknowledgment that intervention has been requested
+        """
+        with db.connection() as conn:
+            # Update session status
+            result = conn.execute(
+                """
+                UPDATE agent_sessions
+                SET status = 'needs_human', intervention_reason = ?
+                WHERE id = ?
+                RETURNING id
+                """,
+                (reason, session_id)
+            ).fetchone()
+
+            if not result:
+                return {"success": False, "error": f"Session not found: {session_id}"}
+
+            # Log to audit
+            conn.execute(
+                """
+                INSERT INTO audit_log (entity_type, entity_id, action, new_value, actor)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("agent_session", 0, "intervention_requested",
+                 json.dumps({"session_id": session_id, "reason": reason}),
+                 "agent")
+            )
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "status": "needs_human",
+            "message": "Intervention requested. The HOTL supervisor has been notified.",
+        }
+
+    @mcp.tool()
+    async def agent_log_file_operation(
+        session_id: str,
+        file_path: str,
+        operation: str,
+        diff: str | None = None,
+        old_path: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Log a file operation performed by a Claude Code subagent.
+
+        Used to track all file changes made during autonomous operation
+        for review and potential rollback.
+
+        Args:
+            session_id: The agent session ID
+            file_path: Path to the file that was modified
+            operation: Type of operation (create, modify, delete, rename)
+            diff: Optional git-style diff showing changes
+            old_path: For renames, the original file path
+
+        Returns:
+            Acknowledgment with file change ID
+        """
+        valid_operations = ("create", "modify", "delete", "rename")
+        if operation not in valid_operations:
+            return {
+                "success": False,
+                "error": f"Invalid operation. Must be one of: {valid_operations}",
+            }
+
+        with db.connection() as conn:
+            # Verify session exists
+            session = conn.execute(
+                "SELECT id FROM agent_sessions WHERE id = ?",
+                (session_id,)
+            ).fetchone()
+
+            if not session:
+                return {"success": False, "error": f"Session not found: {session_id}"}
+
+            # Insert file change record
+            cursor = conn.execute(
+                """
+                INSERT INTO agent_file_changes (session_id, file_path, change_type, diff, old_path)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, file_path, change_type) DO UPDATE SET
+                    diff = excluded.diff,
+                    old_path = excluded.old_path
+                RETURNING id
+                """,
+                (session_id, file_path, operation, diff, old_path)
+            )
+            change_id = cursor.fetchone()[0]
+
+        return {
+            "success": True,
+            "change_id": change_id,
+            "session_id": session_id,
+            "file_path": file_path,
+            "operation": operation,
+        }
+
+    @mcp.tool()
+    async def agent_get_session_context(session_id: str) -> dict[str, Any]:
+        """
+        Get the context and status for an agent session.
+
+        Allows a subagent to retrieve its own context and check status.
+
+        Args:
+            session_id: The agent session ID
+
+        Returns:
+            Session context and current status
+        """
+        with db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id, task, status, context_json, working_dir,
+                       execution_id, created_at, started_at
+                FROM agent_sessions WHERE id = ?
+                """,
+                (session_id,)
+            ).fetchone()
+
+            if not row:
+                return {"success": False, "error": f"Session not found: {session_id}"}
+
+            # Get file changes count
+            changes = conn.execute(
+                "SELECT COUNT(*) as count FROM agent_file_changes WHERE session_id = ?",
+                (session_id,)
+            ).fetchone()
+
+        context = json.loads(row["context_json"]) if row["context_json"] else {}
+
+        return {
+            "success": True,
+            "session_id": row["id"],
+            "task": row["task"],
+            "status": row["status"],
+            "context": context,
+            "working_dir": row["working_dir"],
+            "execution_id": row["execution_id"],
+            "file_changes_count": changes["count"],
+            "created_at": row["created_at"],
+            "started_at": row["started_at"],
+        }
+
+    @mcp.tool()
+    async def agent_list_sessions(
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """
+        List agent sessions with optional status filter.
+
+        Args:
+            status: Optional status filter (pending, running, completed, failed, needs_human, cancelled)
+            limit: Maximum number of sessions to return
+
+        Returns:
+            List of agent session summaries
+        """
+        with db.connection() as conn:
+            if status:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM v_agent_sessions
+                    WHERE status = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (status, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM v_agent_sessions
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                ).fetchall()
+
+            return [dict(row) for row in rows]
+
+    @mcp.tool()
+    async def agent_get_file_changes(session_id: str) -> list[dict[str, Any]]:
+        """
+        Get all file changes for an agent session.
+
+        Args:
+            session_id: The agent session ID
+
+        Returns:
+            List of file change records
+        """
+        with db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, file_path, change_type, diff, old_path, created_at
+                FROM agent_file_changes
+                WHERE session_id = ?
+                ORDER BY created_at
+                """,
+                (session_id,)
+            ).fetchall()
+
+            return [dict(row) for row in rows]
+
     return mcp
 
 

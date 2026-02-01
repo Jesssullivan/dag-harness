@@ -1,8 +1,10 @@
 """HOTL Supervisor Agent using LangGraph for autonomous operation."""
 
 import logging
+import sqlite3
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional, Callable
 
 from langgraph.graph import StateGraph, END
@@ -11,6 +13,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from harness.db.state import StateDB
 from harness.hotl.state import HOTLState, HOTLPhase, create_initial_state
 from harness.hotl.notifications import NotificationService, NotificationConfig
+from harness.hotl.agent_session import AgentStatus, AgentSessionManager
+from harness.hotl.claude_integration import HOTLClaudeIntegration, ClaudeAgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,8 @@ class HOTLSupervisor:
             config: Optional configuration dict with keys:
                 - discord_webhook_url: Discord webhook for notifications
                 - email_*: Email configuration
+                - claude_*: Claude agent configuration
+                - repo_root: Repository root for agent working directory
         """
         self.db = db
         self.config = config or {}
@@ -63,8 +69,43 @@ class HOTLSupervisor:
         )
         self.notification_service = NotificationService(notif_config)
 
+        # Initialize Claude agent integration
+        agent_config = ClaudeAgentConfig(
+            claude_cli_path=self.config.get("claude_cli_path", "claude"),
+            default_timeout=self.config.get("claude_timeout", 600),
+            max_concurrent_agents=self.config.get("claude_max_concurrent", 3),
+            skip_permissions=self.config.get("claude_skip_permissions", False),
+            model=self.config.get("claude_model"),
+        )
+        session_manager = AgentSessionManager(db=db)
+        self.claude_integration = HOTLClaudeIntegration(
+            config=agent_config,
+            session_manager=session_manager,
+            db=db,
+        )
+
+        # Set up agent callbacks
+        self.claude_integration.set_callbacks(
+            on_complete=self._on_agent_complete,
+            on_progress=self._on_agent_progress,
+            on_intervention=self._on_agent_intervention,
+        )
+
+        # Repository root for agent working directory
+        self.repo_root = Path(self.config.get("repo_root", "."))
+
         # Initialize checkpointer for state persistence
-        self.checkpointer = SqliteSaver.from_conn_string(str(db.db_path))
+        # Use direct connection for SQLite checkpoint saver
+        if db._is_memory:
+            # For in-memory databases, create a separate checkpoint connection
+            self._checkpoint_conn = sqlite3.connect(":memory:", check_same_thread=False)
+        else:
+            # For file-based databases, create a separate connection with WAL mode
+            checkpoint_db_path = str(db.db_path).replace(".db", "_checkpoint.db")
+            self._checkpoint_conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
+            self._checkpoint_conn.execute("PRAGMA journal_mode=WAL")
+
+        self.checkpointer = SqliteSaver(self._checkpoint_conn)
 
         # Custom node functions can be registered here
         self._custom_nodes: dict[str, Callable] = {}
@@ -86,6 +127,7 @@ class HOTLSupervisor:
         graph.add_node("plan", self._plan_node)
         graph.add_node("gap_analysis", self._gap_analysis_node)
         graph.add_node("execute_task", self._execute_task_node)
+        graph.add_node("agent_execute", self._agent_execute_node)
         graph.add_node("test", self._test_node)
         graph.add_node("notify", self._notify_node)
         graph.add_node("decide_next", self._decide_next_node)
@@ -105,6 +147,7 @@ class HOTLSupervisor:
                 "plan": "plan",
                 "gap_analysis": "gap_analysis",
                 "execute": "execute_task",
+                "agent_execute": "agent_execute",
                 "test": "test",
                 "notify": "notify",
                 "end": END
@@ -112,7 +155,7 @@ class HOTLSupervisor:
         )
 
         # All action nodes loop back to decide_next
-        for node in ["research", "plan", "gap_analysis", "execute_task", "test", "notify"]:
+        for node in ["research", "plan", "gap_analysis", "execute_task", "agent_execute", "test", "notify"]:
             graph.add_edge(node, "decide_next")
 
         return graph.compile(checkpointer=self.checkpointer)
@@ -125,7 +168,9 @@ class HOTLSupervisor:
         1. If stop requested -> end
         2. If max iterations reached -> notify then end
         3. If notification due -> notify
-        4. Otherwise cycle through phases
+        4. If pending interventions -> notify (alert human)
+        5. If gaps identified and agents enabled -> agent_execute
+        6. Otherwise cycle through phases
         """
         if state.get("stop_requested", False):
             return "end"
@@ -135,6 +180,11 @@ class HOTLSupervisor:
             if state.get("phase") == HOTLPhase.NOTIFYING:
                 return "end"
             return "notify"
+
+        # Check if any agents need human intervention
+        pending_interventions = state.get("pending_interventions", [])
+        if pending_interventions:
+            return "notify"  # Alert human about pending interventions
 
         # Check if notification is due
         time_since_notify = time.time() - state.get("last_notification_time", 0)
@@ -146,16 +196,21 @@ class HOTLSupervisor:
         if state.get("pause_requested", False):
             return "notify"  # Send pause notification
 
-        # Cycle through phases
-        phase_order = ["research", "plan", "gap_analysis", "execute", "test"]
+        # Check for active agent sessions
+        active_agents = state.get("active_agent_sessions", [])
+        if active_agents:
+            # Continue monitoring agents
+            return "agent_execute"
+
         current_phase = state.get("phase", HOTLPhase.IDLE)
 
-        # Map phase to route
+        # Map phase to route - now includes agent execution path
         phase_to_route = {
             HOTLPhase.IDLE: "research",
             HOTLPhase.RESEARCHING: "plan",
             HOTLPhase.PLANNING: "gap_analysis",
-            HOTLPhase.GAP_ANALYZING: "execute",
+            HOTLPhase.GAP_ANALYZING: "agent_execute",  # Spawn agents for gaps
+            HOTLPhase.AGENT_EXECUTING: "agent_execute",  # Continue monitoring
             HOTLPhase.EXECUTING: "test",
             HOTLPhase.TESTING: "research",  # Loop back
             HOTLPhase.NOTIFYING: "research",
@@ -347,6 +402,144 @@ class HOTLSupervisor:
                 "errors": [f"Task {task_id} failed: {e}"]
             }
 
+    def _agent_execute_node(self, state: HOTLState) -> dict:
+        """
+        Manage Claude Code agent execution for gap/fix tasks.
+
+        This node:
+        1. Spawns new agents for identified gaps
+        2. Monitors active agent sessions
+        3. Handles agent completion or intervention requests
+        """
+        logger.info("HOTL agent_execute phase starting")
+
+        gaps = state.get("plan_gaps", [])
+        active_sessions = list(state.get("active_agent_sessions", []))
+        pending_interventions = list(state.get("pending_interventions", []))
+        completed_sessions: list[str] = []
+
+        # Check status of active agents
+        sessions_to_remove = []
+        for session_id in active_sessions:
+            try:
+                session = self.claude_integration.get_session(session_id)
+                if not session:
+                    sessions_to_remove.append(session_id)
+                    continue
+
+                if session.status == AgentStatus.COMPLETED:
+                    logger.info(f"Agent {session_id} completed successfully")
+                    sessions_to_remove.append(session_id)
+                    completed_sessions.append(session_id)
+
+                elif session.status == AgentStatus.FAILED:
+                    logger.warning(f"Agent {session_id} failed: {session.error_message}")
+                    sessions_to_remove.append(session_id)
+
+                elif session.status == AgentStatus.NEEDS_HUMAN:
+                    logger.info(f"Agent {session_id} needs intervention: {session.intervention_reason}")
+                    if session_id not in pending_interventions:
+                        pending_interventions.append(session_id)
+                    sessions_to_remove.append(session_id)
+
+                elif session.status == AgentStatus.CANCELLED:
+                    sessions_to_remove.append(session_id)
+
+            except Exception as e:
+                logger.error(f"Error checking agent {session_id}: {e}")
+                sessions_to_remove.append(session_id)
+
+        # Remove completed/failed sessions from active list
+        for session_id in sessions_to_remove:
+            if session_id in active_sessions:
+                active_sessions.remove(session_id)
+
+        # Spawn new agents for gaps (if we have capacity)
+        max_concurrent = self.config.get("claude_max_concurrent", 3)
+        while gaps and len(active_sessions) < max_concurrent:
+            gap = gaps.pop(0)
+            try:
+                # Create task from gap description
+                task = self._create_agent_task(gap, state)
+                session = self.claude_integration.spawn_agent(
+                    task=task,
+                    working_dir=self.repo_root,
+                    context={
+                        "gap": gap,
+                        "plan": state.get("current_plan"),
+                        "iteration": state.get("iteration_count", 0),
+                    },
+                )
+                active_sessions.append(session.id)
+                logger.info(f"Spawned agent {session.id} for gap: {gap[:50]}...")
+
+            except Exception as e:
+                logger.error(f"Failed to spawn agent for gap '{gap}': {e}")
+
+        # Determine phase based on agent status
+        if active_sessions:
+            phase = HOTLPhase.AGENT_EXECUTING
+        elif pending_interventions:
+            phase = HOTLPhase.AGENT_EXECUTING  # Stay here, will route to notify
+        else:
+            phase = HOTLPhase.EXECUTING  # Move to regular execution
+
+        return {
+            "phase": phase,
+            "plan_gaps": gaps,
+            "active_agent_sessions": active_sessions,
+            "completed_agent_sessions": completed_sessions,
+            "pending_interventions": pending_interventions,
+        }
+
+    def _create_agent_task(self, gap: str, state: HOTLState) -> str:
+        """
+        Create a task prompt for a Claude agent based on a gap.
+
+        Args:
+            gap: Gap description from gap analysis
+            state: Current HOTL state for context
+
+        Returns:
+            Formatted task string for the agent
+        """
+        current_plan = state.get("current_plan", "No plan available")
+
+        return f"""You are working on addressing the following gap in our Ansible role codebase:
+
+## Gap to Address
+{gap}
+
+## Current Plan Context
+{current_plan[:2000]}
+
+## Instructions
+1. Analyze the gap and determine what changes are needed
+2. Make the necessary code changes to address this gap
+3. Report your progress using the agent_report_progress tool
+4. If you encounter blockers, use agent_request_intervention
+5. Log all file changes using agent_log_file_operation
+6. Provide a summary when complete
+
+Work autonomously to resolve this gap while maintaining code quality and following existing patterns.
+"""
+
+    # Agent lifecycle callbacks
+    def _on_agent_complete(self, session) -> None:
+        """Called when an agent completes."""
+        logger.info(f"Agent {session.id} completed with status: {session.status.value}")
+        if session.file_changes:
+            logger.info(f"  Made {len(session.file_changes)} file changes")
+
+    def _on_agent_progress(self, session_id: str, progress: str) -> None:
+        """Called when an agent reports progress."""
+        logger.debug(f"Agent {session_id} progress: {progress[:100]}")
+
+    def _on_agent_intervention(self, session) -> None:
+        """Called when an agent needs human intervention."""
+        logger.warning(f"Agent {session.id} needs intervention: {session.intervention_reason}")
+        # Could trigger immediate notification here
+
     def _test_node(self, state: HOTLState) -> dict:
         """
         Run tests to validate changes.
@@ -429,6 +622,11 @@ class HOTLSupervisor:
         insights = state.get("codebase_insights", [])
         gaps = state.get("plan_gaps", [])
 
+        # Agent session info
+        active_agents = state.get("active_agent_sessions", [])
+        completed_agents = state.get("completed_agent_sessions", [])
+        pending_interventions = state.get("pending_interventions", [])
+
         summary = f"""## HOTL Execution Summary
 
 **Phase**: {phase}
@@ -439,6 +637,21 @@ class HOTLSupervisor:
 - Failed: {failed}
 - Pending: {pending}
 
+### Claude Agent Status
+- Active Agents: {len(active_agents)}
+- Completed Sessions: {len(completed_agents)}
+- Pending Interventions: {len(pending_interventions)}
+"""
+
+        # Add intervention alerts if any
+        if pending_interventions:
+            summary += "\n**ATTENTION: Agent Interventions Required**\n"
+            for session_id in pending_interventions[:5]:
+                session = self.claude_integration.get_session(session_id)
+                if session:
+                    summary += f"- {session_id[:8]}: {session.intervention_reason or 'Unknown reason'}\n"
+
+        summary += f"""
 ### Recent Insights
 {chr(10).join(f"- {i}" for i in insights[-3:]) if insights else "None"}
 
@@ -515,6 +728,9 @@ class HOTLSupervisor:
             self._current_session_id = None
             # Close notification service
             self.notification_service.close_sync()
+            # Terminate any running agents
+            if self.claude_integration:
+                self.claude_integration.terminate_all_agents("Supervisor shutdown")
 
     def request_stop(self) -> bool:
         """
@@ -567,3 +783,88 @@ class HOTLSupervisor:
             func: Function that takes state and returns state update
         """
         self._custom_nodes[name] = func
+
+    # =========================================================================
+    # AGENT MANAGEMENT METHODS
+    # =========================================================================
+
+    def get_active_agents(self) -> list:
+        """Get all currently active Claude agent sessions."""
+        return self.claude_integration.get_active_agents()
+
+    def get_pending_interventions(self) -> list:
+        """Get agent sessions that need human intervention."""
+        return self.claude_integration.get_pending_interventions()
+
+    def resolve_intervention(
+        self,
+        session_id: str,
+        resolution: str,
+        continue_agent: bool = False
+    ) -> None:
+        """
+        Resolve a pending agent intervention.
+
+        Args:
+            session_id: Agent session ID
+            resolution: Description of the resolution
+            continue_agent: If True, spawn a continuation agent
+        """
+        self.claude_integration.resolve_intervention(
+            session_id=session_id,
+            resolution=resolution,
+            continue_agent=continue_agent
+        )
+        logger.info(f"Resolved intervention for agent {session_id}")
+
+    def terminate_agent(self, session_id: str, reason: str = "Manual termination") -> bool:
+        """
+        Terminate a running agent.
+
+        Args:
+            session_id: Agent session ID
+            reason: Reason for termination
+
+        Returns:
+            True if terminated successfully
+        """
+        return self.claude_integration.terminate_agent(session_id, reason)
+
+    def terminate_all_agents(self, reason: str = "Shutdown") -> int:
+        """
+        Terminate all running agents.
+
+        Args:
+            reason: Reason for termination
+
+        Returns:
+            Number of agents terminated
+        """
+        return self.claude_integration.terminate_all_agents(reason)
+
+    def get_agent_stats(self) -> dict[str, Any]:
+        """Get Claude agent integration statistics."""
+        return self.claude_integration.get_stats()
+
+    def spawn_agent_manually(
+        self,
+        task: str,
+        working_dir: Optional[Path] = None,
+        context: Optional[dict] = None
+    ):
+        """
+        Manually spawn a Claude agent outside the normal workflow.
+
+        Args:
+            task: Task description for the agent
+            working_dir: Working directory (uses repo_root if not specified)
+            context: Optional context dict
+
+        Returns:
+            AgentSession for the spawned agent
+        """
+        return self.claude_integration.spawn_agent(
+            task=task,
+            working_dir=working_dir or self.repo_root,
+            context=context or {}
+        )

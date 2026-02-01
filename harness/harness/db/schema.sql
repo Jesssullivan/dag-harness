@@ -291,6 +291,40 @@ CREATE TABLE IF NOT EXISTS merge_train_entries (
 );
 
 -- ============================================================================
+-- AGENT SESSIONS (Claude Code subagents for HOTL)
+-- ============================================================================
+
+-- Agent session tracking for HOTL Claude Code integration
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id TEXT PRIMARY KEY,  -- UUID string
+    execution_id INTEGER REFERENCES workflow_executions(id) ON DELETE SET NULL,
+    task TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed', 'needs_human', 'cancelled')),
+    output TEXT,
+    error_message TEXT,
+    intervention_reason TEXT,
+    context_json TEXT,  -- JSON object with task context
+    progress_json TEXT,  -- JSON array of progress updates
+    working_dir TEXT NOT NULL,
+    pid INTEGER,  -- Process ID when running
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+-- File changes made by agents
+CREATE TABLE IF NOT EXISTS agent_file_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    file_path TEXT NOT NULL,
+    change_type TEXT NOT NULL CHECK (change_type IN ('create', 'modify', 'delete', 'rename')),
+    diff TEXT,  -- Git-style diff if available
+    old_path TEXT,  -- For renames, the original path
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(session_id, file_path, change_type)
+);
+
+-- ============================================================================
 -- INDEXES
 -- ============================================================================
 
@@ -324,6 +358,11 @@ CREATE INDEX IF NOT EXISTS idx_regressions_status ON test_regressions(status);
 CREATE INDEX IF NOT EXISTS idx_regressions_test ON test_regressions(test_name);
 CREATE INDEX IF NOT EXISTS idx_merge_train_mr ON merge_train_entries(mr_id);
 CREATE INDEX IF NOT EXISTS idx_merge_train_status ON merge_train_entries(status);
+
+-- Agent session indexes
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_status ON agent_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_execution ON agent_sessions(execution_id);
+CREATE INDEX IF NOT EXISTS idx_agent_file_changes_session ON agent_file_changes(session_id);
 
 -- ============================================================================
 -- VIEWS FOR COMMON QUERIES
@@ -398,6 +437,27 @@ SELECT
 FROM context_capabilities cc
 JOIN execution_contexts ec ON cc.context_id = ec.id;
 
+-- Agent sessions with file change counts
+CREATE VIEW IF NOT EXISTS v_agent_sessions AS
+SELECT
+    a.id,
+    a.execution_id,
+    a.task,
+    a.status,
+    a.working_dir,
+    a.intervention_reason,
+    a.created_at,
+    a.started_at,
+    a.completed_at,
+    a.pid,
+    (SELECT COUNT(*) FROM agent_file_changes fc WHERE fc.session_id = a.id) as file_change_count,
+    CASE
+        WHEN a.completed_at IS NOT NULL AND a.started_at IS NOT NULL
+        THEN (julianday(a.completed_at) - julianday(a.started_at)) * 86400
+        ELSE NULL
+    END as duration_seconds
+FROM agent_sessions a;
+
 -- ============================================================================
 -- RECURSIVE CTE EXAMPLES (for reference, used in Python code)
 -- ============================================================================
@@ -467,3 +527,5 @@ AFTER UPDATE ON merge_train_entries
 BEGIN
     UPDATE merge_train_entries SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
+
+-- Note: agent_sessions doesn't have updated_at since we track started_at and completed_at separately

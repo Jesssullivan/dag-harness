@@ -1,0 +1,29 @@
+---
+# Default variables for sample_role
+
+# Application settings
+sample_role_app_name: "EMS Platform"
+sample_role_app_version: "1.0.0"
+sample_role_install_path: "C:\\Program Files\\EMS"
+
+# IIS settings
+sample_role_iis_site_name: "EMS Platform"
+sample_role_iis_port: 443
+sample_role_iis_ssl_enabled: true
+
+# Database connection
+sample_role_db_server: "localhost"
+sample_role_db_name: "EMS_Platform"
+sample_role_db_port: 1433
+
+# Feature flags
+configure_iis: true
+configure_database: true
+enable_monitoring: true
+
+# Credential references (documented)
+# These credentials should be available in 1Password:
+# - ansible-self: WinRM authentication for Ansible
+# - dev-sql-sa: SQL Server SA credentials
+# - ems-api-token: API token for external services (base58)
+# - service-account-prod: Production service account

@@ -266,8 +266,12 @@ class BootstrapWizard:
             self.state.warnings.append("Not in a git repository")
 
         # Check for harness package
+        # First try repo root structure (harness/harness)
         harness_pkg = self.project_root / "harness" / "harness"
-        if harness_pkg.exists():
+        # Fall back to being run from within harness/ directory (harness/)
+        if not harness_pkg.exists():
+            harness_pkg = self.project_root / "harness"
+        if harness_pkg.exists() and (harness_pkg / "__init__.py").exists():
             self.console.print(f"  Harness package: {harness_pkg}")
         else:
             self.state.errors.append(f"Harness package not found at {harness_pkg}")

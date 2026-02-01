@@ -364,3 +364,70 @@ class ActiveRegressionView(BaseModel):
     last_error_message: Optional[str] = None
     status: str
     notes: Optional[str] = None
+
+
+# ============================================================================
+# AGENT SESSION MODELS (HOTL Claude Code Integration)
+# ============================================================================
+
+class AgentSessionStatus(str, Enum):
+    """Status of a Claude Code agent session."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    NEEDS_HUMAN = "needs_human"
+    CANCELLED = "cancelled"
+
+
+class AgentFileChangeType(str, Enum):
+    """Type of file change made by an agent."""
+    CREATE = "create"
+    MODIFY = "modify"
+    DELETE = "delete"
+    RENAME = "rename"
+
+
+class AgentSessionModel(BaseModel):
+    """Database model for agent sessions."""
+    id: str  # UUID string
+    execution_id: Optional[int] = None
+    task: str
+    status: AgentSessionStatus = AgentSessionStatus.PENDING
+    output: Optional[str] = None
+    error_message: Optional[str] = None
+    intervention_reason: Optional[str] = None
+    context_json: Optional[str] = None
+    progress_json: Optional[str] = None
+    working_dir: str
+    pid: Optional[int] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class AgentFileChange(BaseModel):
+    """Database model for agent file changes."""
+    id: Optional[int] = None
+    session_id: str
+    file_path: str
+    change_type: AgentFileChangeType
+    diff: Optional[str] = None
+    old_path: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class AgentSessionView(BaseModel):
+    """View model for agent sessions with computed fields."""
+    id: str
+    execution_id: Optional[int] = None
+    task: str
+    status: str
+    working_dir: str
+    intervention_reason: Optional[str] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    pid: Optional[int] = None
+    file_change_count: int = 0
+    duration_seconds: Optional[float] = None

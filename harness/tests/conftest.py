@@ -1,9 +1,11 @@
 """Pytest fixtures for harness tests."""
 
+import json
 import pytest
 import tempfile
 from pathlib import Path
 from typing import Generator
+from unittest.mock import MagicMock, patch
 
 from harness.db.state import StateDB
 from harness.db.models import (
@@ -12,6 +14,10 @@ from harness.db.models import (
 )
 from harness.config import HarnessConfig
 
+
+# ============================================================================
+# DATABASE FIXTURES
+# ============================================================================
 
 @pytest.fixture
 def temp_db_path(tmp_path: Path) -> Path:
@@ -156,6 +162,312 @@ def config(temp_db_path: Path) -> HarnessConfig:
         db_path=str(temp_db_path),
     )
 
+
+# ============================================================================
+# SAMPLE ROLE FIXTURES
+# ============================================================================
+
+@pytest.fixture
+def sample_role_path() -> Path:
+    """Path to the sample role in fixtures."""
+    return Path(__file__).parent / "fixtures" / "sample_role"
+
+
+@pytest.fixture
+def temp_role_dir(tmp_path: Path) -> Path:
+    """Create a temporary role directory structure."""
+    role_dir = tmp_path / "test_role"
+    role_dir.mkdir()
+
+    # Create meta/main.yml
+    meta_dir = role_dir / "meta"
+    meta_dir.mkdir()
+    (meta_dir / "main.yml").write_text("""---
+galaxy_info:
+  description: Test role for unit tests
+dependencies:
+  - common
+  - role: other_role
+""")
+
+    # Create tasks/main.yml
+    tasks_dir = role_dir / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "main.yml").write_text("""---
+- name: Test task
+  debug:
+    msg: "Hello from test role"
+""")
+
+    # Create defaults/main.yml
+    defaults_dir = role_dir / "defaults"
+    defaults_dir.mkdir()
+    (defaults_dir / "main.yml").write_text("""---
+test_variable: "default_value"
+""")
+
+    return role_dir
+
+
+@pytest.fixture
+def temp_role_with_credentials(tmp_path: Path) -> Path:
+    """Create a temporary role with credential references."""
+    role_dir = tmp_path / "cred_role"
+    role_dir.mkdir()
+
+    # Create meta
+    meta_dir = role_dir / "meta"
+    meta_dir.mkdir()
+    (meta_dir / "main.yml").write_text("""---
+galaxy_info:
+  description: Role with credentials
+dependencies: []
+""")
+
+    # Create tasks with credentials
+    tasks_dir = role_dir / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "main.yml").write_text("""---
+- name: Get password
+  set_fact:
+    password: "{{ op_read('test-cred', 'password') }}"
+
+- name: Get base58 token
+  set_fact:
+    token: "{{ op_read('api-token', 'credential') | decode_base58 }}"
+
+- name: Get with lookup
+  set_fact:
+    secret: "{{ lookup('op', 'another-cred') }}"
+""")
+
+    return role_dir
+
+
+# ============================================================================
+# MOCK GITLAB FIXTURES
+# ============================================================================
+
+@pytest.fixture
+def mock_gitlab_responses() -> dict:
+    """Mock responses for GitLab API calls."""
+    return {
+        "iterations": [
+            {
+                "id": 12345,
+                "title": "Sprint 42",
+                "state": "opened",
+                "start_date": "2024-01-01",
+                "due_date": "2024-01-14",
+                "group": {"id": 100}
+            }
+        ],
+        "issue_created": {
+            "id": 67890,
+            "iid": 123,
+            "title": "Box up `common` role",
+            "state": "opened",
+            "web_url": "https://gitlab.example.com/project/-/issues/123",
+            "labels": ["role", "ansible"],
+            "assignees": [{"username": "testuser"}],
+            "weight": 3
+        },
+        "mr_created": {
+            "id": 11111,
+            "iid": 456,
+            "source_branch": "sid/common",
+            "target_branch": "main",
+            "title": "Box up common role",
+            "state": "opened",
+            "web_url": "https://gitlab.example.com/project/-/merge_requests/456",
+            "merge_status": "can_be_merged",
+            "squash_on_merge": True,
+            "force_remove_source_branch": True
+        },
+        "merge_train": [
+            {
+                "id": 1,
+                "merge_request": {"iid": 456},
+                "pipeline": {"id": 999, "status": "running"},
+                "status": "merging"
+            }
+        ]
+    }
+
+
+@pytest.fixture
+def mock_glab_run():
+    """Mock subprocess.run for glab commands."""
+    def _mock_run(cmd, **kwargs):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+
+        cmd_str = " ".join(cmd)
+
+        if "issue create" in cmd_str:
+            result.stdout = "https://gitlab.example.com/project/-/issues/123"
+        elif "mr create" in cmd_str:
+            result.stdout = "https://gitlab.example.com/project/-/merge_requests/456"
+        elif "auth status" in cmd_str:
+            result.stdout = "Token: glpat-testtoken123"
+
+        return result
+
+    return _mock_run
+
+
+@pytest.fixture
+def mock_gitlab_api(mock_gitlab_responses):
+    """Fixture that mocks GitLab API calls via glab."""
+    with patch('subprocess.run') as mock_run:
+        def run_side_effect(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+
+            cmd_str = " ".join(cmd)
+
+            if "glab api" in cmd_str:
+                if "iterations" in cmd_str:
+                    result.stdout = json.dumps(mock_gitlab_responses["iterations"])
+                elif "/issues/" in cmd_str and "POST" not in cmd_str:
+                    result.stdout = json.dumps(mock_gitlab_responses["issue_created"])
+                elif "/merge_requests/" in cmd_str:
+                    result.stdout = json.dumps(mock_gitlab_responses["mr_created"])
+                elif "merge_trains" in cmd_str:
+                    result.stdout = json.dumps(mock_gitlab_responses["merge_train"])
+                else:
+                    result.stdout = "[]"
+            elif "issue create" in cmd_str:
+                result.stdout = "https://gitlab.example.com/project/-/issues/123"
+            elif "mr create" in cmd_str:
+                result.stdout = "https://gitlab.example.com/project/-/merge_requests/456"
+            elif "auth status" in cmd_str:
+                result.stdout = "Token: glpat-testtoken123"
+            else:
+                result.stdout = ""
+
+            return result
+
+        mock_run.side_effect = run_side_effect
+        yield mock_run
+
+
+# ============================================================================
+# MOCK NOTIFICATION FIXTURES
+# ============================================================================
+
+@pytest.fixture
+def mock_httpx_client():
+    """Mock httpx client for notification tests."""
+    with patch('httpx.Client') as mock_client_class:
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_client.post.return_value = mock_response
+        mock_client_class.return_value = mock_client
+
+        yield mock_client
+
+
+@pytest.fixture
+def mock_async_httpx_client():
+    """Mock async httpx client for notification tests."""
+    with patch('httpx.AsyncClient') as mock_client_class:
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+
+        # Make post return a coroutine
+        async def mock_post(*args, **kwargs):
+            return mock_response
+
+        mock_client.post = mock_post
+        mock_client.aclose = MagicMock(return_value=None)
+
+        # Make aclose async
+        async def mock_aclose():
+            pass
+        mock_client.aclose = mock_aclose
+
+        mock_client_class.return_value = mock_client
+
+        yield mock_client
+
+
+@pytest.fixture
+def notification_config():
+    """Configuration for notification service tests."""
+    from harness.hotl.notifications import NotificationConfig
+    return NotificationConfig(
+        discord_webhook_url="https://discord.com/api/webhooks/test/hook",
+        email_smtp_host="smtp.example.com",
+        email_smtp_port=587,
+        email_from="harness@example.com",
+        email_to="alerts@example.com",
+    )
+
+
+# ============================================================================
+# WORKFLOW FIXTURES
+# ============================================================================
+
+@pytest.fixture
+def workflow_db(db_with_roles: StateDB) -> StateDB:
+    """Database with a workflow definition."""
+    nodes = [
+        {"id": "start", "type": "start"},
+        {"id": "analyze", "type": "task"},
+        {"id": "test", "type": "task"},
+        {"id": "end", "type": "end"}
+    ]
+    edges = [
+        {"from": "start", "to": "analyze"},
+        {"from": "analyze", "to": "test"},
+        {"from": "test", "to": "end"}
+    ]
+
+    db_with_roles.create_workflow_definition(
+        name="box-up-role",
+        description="Standard box-up workflow",
+        nodes=nodes,
+        edges=edges
+    )
+
+    return db_with_roles
+
+
+# ============================================================================
+# HOTL FIXTURES
+# ============================================================================
+
+@pytest.fixture
+def hotl_state():
+    """Create a sample HOTL state for testing."""
+    from harness.hotl.state import HOTLState, HOTLPhase, create_initial_state
+    return create_initial_state(
+        max_iterations=10,
+        notification_interval=60,
+        config={"test_mode": True}
+    )
+
+
+@pytest.fixture
+def mock_langgraph_checkpointer(tmp_path):
+    """Mock LangGraph checkpointer for testing."""
+    with patch('langgraph.checkpoint.sqlite.SqliteSaver') as mock_saver:
+        mock_instance = MagicMock()
+        mock_saver.from_conn_string.return_value = mock_instance
+        yield mock_instance
+
+
+# ============================================================================
+# PYTEST CONFIGURATION
+# ============================================================================
 
 # Pytest markers
 def pytest_configure(config):

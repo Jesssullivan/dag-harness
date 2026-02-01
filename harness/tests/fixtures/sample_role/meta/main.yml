@@ -1,0 +1,19 @@
+---
+galaxy_info:
+  author: Test Author
+  description: A sample role for testing the harness parser
+  company: Test Company
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Windows
+      versions:
+        - 2019
+        - 2022
+
+dependencies:
+  - common
+  - role: windows_prerequisites
+    when: ansible_os_family == 'Windows'
+  - name: ems_registry_urls
+  - src: iis_config

@@ -374,15 +374,23 @@ class SelfTester:
     def _test_mcp_importable(self) -> TestResult:
         """Test MCP server module can be imported."""
         import time
+        import importlib
         start = time.time()
 
         try:
-            # Add harness to path if needed
-            harness_path = str(self.harness_dir)
-            if harness_path not in sys.path:
-                sys.path.insert(0, harness_path)
+            # Use importlib to avoid any path issues
+            # The harness package should already be importable since we're running from it
+            mcp_server = importlib.import_module("harness.mcp.server")
 
-            from harness.mcp.server import create_mcp_server
+            # Verify the create_mcp_server function exists
+            if not hasattr(mcp_server, "create_mcp_server"):
+                duration = (time.time() - start) * 1000
+                return TestResult(
+                    name="mcp_importable",
+                    status=TestStatus.FAIL,
+                    message="MCP server missing create_mcp_server",
+                    duration_ms=duration
+                )
 
             duration = (time.time() - start) * 1000
             return TestResult(

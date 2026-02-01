@@ -235,13 +235,23 @@ class GitLabClient:
             weight=issue_data.get("weight")
         )
 
-        # Assign to iteration if provided
+        # Build update data for iteration and weight (glab doesn't support these)
+        update_data = {}
         if iteration_id:
+            update_data["iteration_id"] = iteration_id
+        if weight is not None:
+            update_data["weight"] = weight
+
+        # Apply updates via API if needed
+        if update_data:
             self._api_put(
                 f"projects/{self.config.project_path_encoded}/issues/{issue_iid}",
-                {"iteration_id": iteration_id}
+                update_data
             )
-            issue.iteration_id = iteration_id
+            if iteration_id:
+                issue.iteration_id = iteration_id
+            if weight is not None:
+                issue.weight = weight
 
         self.db.upsert_issue(issue)
         return issue
@@ -496,7 +506,7 @@ class GitLabClient:
 
     def _merge_when_pipeline_succeeds(self, mr_iid: int, squash: bool = True) -> dict[str, Any]:
         """
-        Fallback: Merge when pipeline succeeds (for projects without merge trains).
+        Internal: Merge when pipeline succeeds (for projects without merge trains).
 
         Uses: PUT /projects/:id/merge_requests/:iid/merge
 
@@ -515,6 +525,31 @@ class GitLabClient:
             f"projects/{self.config.project_path_encoded}/merge_requests/{mr_iid}/merge",
             data
         )
+
+    def merge_when_pipeline_succeeds(self, mr_iid: int, squash: bool = True) -> dict[str, Any]:
+        """
+        Merge MR when pipeline succeeds (fallback when merge train not enabled).
+
+        This is the standard GitLab merge behavior without merge trains.
+        The MR will be merged automatically once its pipeline passes.
+
+        Uses: PUT /projects/:id/merge_requests/:iid/merge
+
+        Args:
+            mr_iid: Project-scoped MR IID
+            squash: Squash commits on merge (default: True)
+
+        Returns:
+            Merge response data from GitLab API
+
+        Raises:
+            RuntimeError: If the merge request cannot be set to merge
+
+        Example:
+            >>> client.merge_when_pipeline_succeeds(123)
+            {'id': 456, 'iid': 123, 'state': 'merged', ...}
+        """
+        return self._merge_when_pipeline_succeeds(mr_iid, squash)
 
     def get_merge_train(self, target_branch: str = "main") -> list[dict[str, Any]]:
         """

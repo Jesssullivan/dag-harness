@@ -25,6 +25,13 @@ from langchain_core.runnables import RunnableConfig
 
 from harness.db.models import NodeStatus, TestStatus, TestType, WorkflowStatus
 from harness.db.state import StateDB
+from harness.config import NotificationConfig
+from harness.notifications import (
+    NotificationService,
+    notify_workflow_started,
+    notify_workflow_completed,
+    notify_workflow_failed,
+)
 
 
 # ============================================================================
@@ -128,6 +135,7 @@ class BoxUpRoleState(TypedDict, total=False):
     mr_url: Optional[str]
     mr_iid: Optional[int]
     iteration_assigned: bool
+    merge_train_status: Optional[str]  # "added" | "fallback" | "skipped" | "error"
 
     # Workflow control - use reducers for accumulating nodes and errors
     current_node: str
@@ -751,34 +759,108 @@ Closes #{issue_iid}
 
 
 async def add_to_merge_train_node(state: BoxUpRoleState) -> dict:
-    """Add MR to merge train queue."""
+    """
+    Add MR to merge train queue with automatic fallback.
+
+    This node:
+    1. Checks if merge trains are enabled for the project
+    2. If enabled, adds the MR to the merge train
+    3. If not enabled, falls back to merge_when_pipeline_succeeds
+    4. Returns status indicating which path was taken
+
+    Returns:
+        Dict with merge_train_status: "added" | "fallback" | "skipped" | "error"
+    """
     mr_iid = state.get("mr_iid")
+    db = get_module_db()
 
     if not mr_iid:
         return {
+            "merge_train_status": "skipped",
             "errors": ["No MR IID available for merge train"],
             "completed_nodes": ["add_to_merge_train"],
         }
 
-    # Use glab to add to merge train
-    try:
-        result = subprocess.run(
-            ["glab", "mr", "merge", str(mr_iid),
-             "--when-pipeline-succeeds", "--squash"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        # Note: This may fail if merge train is not enabled
-        # We don't treat this as a blocking error
+    if db is None:
         return {
+            "merge_train_status": "skipped",
+            "errors": ["Database not available for merge train operation"],
             "completed_nodes": ["add_to_merge_train"],
         }
 
-    except Exception as e:
-        # Non-blocking - merge train might not be enabled
+    try:
+        from harness.gitlab.api import GitLabClient
+
+        client = GitLabClient(db)
+
+        # Check if MR can be added to merge train
+        availability = client.is_merge_train_available(mr_iid)
+        if not availability.get("available"):
+            reason = availability.get("reason", "Unknown reason")
+            # If already in merge train, that's fine
+            if "already in merge train" in reason.lower():
+                return {
+                    "merge_train_status": "added",
+                    "completed_nodes": ["add_to_merge_train"],
+                }
+            # If there's a blocking issue, report it but don't fail
+            return {
+                "merge_train_status": "skipped",
+                "errors": [f"Cannot add to merge train: {reason}"],
+                "completed_nodes": ["add_to_merge_train"],
+            }
+
+        # Check if merge trains are enabled for the project
+        if client.is_merge_train_enabled():
+            # Add to merge train
+            try:
+                result = client.add_to_merge_train(
+                    mr_iid,
+                    when_pipeline_succeeds=True,
+                    squash=True
+                )
+                return {
+                    "merge_train_status": "added",
+                    "completed_nodes": ["add_to_merge_train"],
+                }
+            except RuntimeError as e:
+                # If merge train add fails, try fallback
+                if "not found" in str(e).lower() or "merge_train" in str(e).lower():
+                    # Fall through to fallback
+                    pass
+                else:
+                    return {
+                        "merge_train_status": "error",
+                        "errors": [f"Failed to add to merge train: {e}"],
+                        "completed_nodes": ["add_to_merge_train"],
+                    }
+
+        # Fallback: merge when pipeline succeeds (for projects without merge trains)
+        try:
+            result = client.merge_when_pipeline_succeeds(mr_iid)
+            return {
+                "merge_train_status": "fallback",
+                "completed_nodes": ["add_to_merge_train"],
+            }
+        except RuntimeError as e:
+            # Pipeline might still be running or MR not ready - non-blocking
+            return {
+                "merge_train_status": "skipped",
+                "errors": [f"Could not set merge when pipeline succeeds: {e}"],
+                "completed_nodes": ["add_to_merge_train"],
+            }
+
+    except ImportError:
         return {
+            "merge_train_status": "error",
+            "errors": ["GitLabClient not available"],
+            "completed_nodes": ["add_to_merge_train"],
+        }
+    except Exception as e:
+        # Non-blocking error - workflow can continue
+        return {
+            "merge_train_status": "error",
+            "errors": [f"Merge train operation failed: {e}"],
             "completed_nodes": ["add_to_merge_train"],
         }
 
@@ -794,6 +876,7 @@ async def report_summary_node(state: BoxUpRoleState) -> dict:
         "commit_sha": state.get("commit_sha"),
         "issue_url": state.get("issue_url"),
         "mr_url": state.get("mr_url"),
+        "merge_train_status": state.get("merge_train_status"),
         "molecule_passed": state.get("molecule_passed"),
         "pytest_passed": state.get("pytest_passed"),
         "credentials": state.get("credentials", []),
@@ -1021,12 +1104,16 @@ class LangGraphWorkflowRunner:
     - Regression tracking via module-level db
     """
 
-    def __init__(self, db: StateDB, db_path: str = "harness.db"):
+    def __init__(self, db: StateDB, db_path: str = "harness.db", notification_config: Optional[NotificationConfig] = None):
         self.db = db
         self.db_path = db_path
         self._graph = None
         # Set module-level db for node access (regression tracking)
         set_module_db(db)
+        # Initialize notification service
+        self._notification_service = NotificationService(
+            notification_config or NotificationConfig(enabled=False)
+        )
 
     async def _get_graph(self):
         """Lazily create and cache the compiled graph."""
@@ -1087,6 +1174,9 @@ class LangGraphWorkflowRunner:
             current_node="validate_role"
         )
 
+        # Send workflow started notification
+        await notify_workflow_started(self._notification_service, role_name, execution_id)
+
         try:
             # Execute the graph
             final_state = await graph.ainvoke(
@@ -1100,15 +1190,25 @@ class LangGraphWorkflowRunner:
                 "completed_nodes": final_state.get("completed_nodes", [])
             })
 
-            # Update final status
+            # Update final status and send notifications
             if final_state.get("errors"):
+                error_msg = "; ".join(final_state.get("errors", []))
                 self.db.update_execution_status(
                     execution_id, WorkflowStatus.FAILED,
-                    error_message="; ".join(final_state.get("errors", []))
+                    error_message=error_msg
+                )
+                await notify_workflow_failed(
+                    self._notification_service, role_name, execution_id,
+                    error=error_msg,
+                    failed_node=final_state.get("current_node")
                 )
             else:
                 self.db.update_execution_status(
                     execution_id, WorkflowStatus.COMPLETED
+                )
+                await notify_workflow_completed(
+                    self._notification_service, role_name, execution_id,
+                    summary=final_state.get("summary", {})
                 )
 
             return {
@@ -1122,6 +1222,11 @@ class LangGraphWorkflowRunner:
             self.db.update_execution_status(
                 execution_id, WorkflowStatus.FAILED,
                 error_message=str(e)
+            )
+            await notify_workflow_failed(
+                self._notification_service, role_name, execution_id,
+                error=str(e),
+                failed_node="unknown"
             )
             return {
                 "status": "error",
