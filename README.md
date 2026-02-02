@@ -14,7 +14,7 @@ Self-installing DAG orchestration for Ansible role deployments using LangGraph.
 
 ```bash
 # Clone and install (GitHub)
-git clone https://github.com/tinyland/dag-harness.git
+git clone https://github.com/Jesssullivan/dag-harness.git
 cd dag-harness/harness
 uv sync
 

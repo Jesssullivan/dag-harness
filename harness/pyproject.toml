@@ -49,10 +49,10 @@ dependencies = [
 [project.urls]
 Homepage = "https://disposable-ansible-dag.tinyland.dev"
 Documentation = "https://disposable-ansible-dag.tinyland.dev"
-Repository = "https://github.com/tinyland/dag-harness"
+Repository = "https://github.com/Jesssullivan/dag-harness"
 GitLab = "https://gitlab.com/tinyland/projects/dag-harness"
-Issues = "https://github.com/tinyland/dag-harness/issues"
-Changelog = "https://github.com/tinyland/dag-harness/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Jesssullivan/dag-harness/issues"
+Changelog = "https://github.com/Jesssullivan/dag-harness/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

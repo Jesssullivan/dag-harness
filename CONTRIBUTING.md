@@ -14,7 +14,7 @@ Thank you for your interest in contributing!
 
 ```bash
 # From GitHub
-git clone https://github.com/tinyland/dag-harness.git
+git clone https://github.com/Jesssullivan/dag-harness.git
 cd dag-harness/harness
 uv sync --all-extras
 
