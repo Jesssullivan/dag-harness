@@ -1,0 +1,22 @@
+---
+# Role: repo-github-sync
+# Wave: 4 (CI Verification)
+# Purpose: Sync repository to GitHub (dual-push setup)
+
+galaxy_info:
+  role_name: repo-github-sync
+  author: dag-harness
+  description: Optional sync to GitHub for dual-remote setup
+  license: MIT
+  min_ansible_version: "2.14"
+
+dependencies:
+  - ci-gitlab-verify
+
+# Dogfood metadata
+dogfood:
+  type: sync
+  idempotent: true
+  optional: true
+  actions:
+    - git_push_github

@@ -1,0 +1,22 @@
+---
+# Role: repo-push-gitlab
+# Wave: 3 (Push & Sync)
+# Purpose: Push repository to GitLab
+
+galaxy_info:
+  role_name: repo-push-gitlab
+  author: dag-harness
+  description: Push all branches and tags to GitLab remote
+  license: MIT
+  min_ansible_version: "2.14"
+
+dependencies:
+  - repo-gitlab-remote
+  - ci-gitlab-config
+
+# Dogfood metadata
+dogfood:
+  type: sync
+  idempotent: true
+  actions:
+    - git_push

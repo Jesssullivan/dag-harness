@@ -1,0 +1,21 @@
+---
+# Role: repo-github-verify
+# Wave: 0 (Foundation)
+# Purpose: Verify GitHub repository exists and is accessible
+
+galaxy_info:
+  role_name: repo-github-verify
+  author: dag-harness
+  description: Verify GitHub repository exists and is configured as a remote
+  license: MIT
+  min_ansible_version: "2.14"
+
+dependencies: []
+
+# Dogfood metadata
+dogfood:
+  type: verification
+  idempotent: true
+  validates:
+    - github_remote_exists
+    - github_accessible

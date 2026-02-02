@@ -1,0 +1,21 @@
+---
+# Role: repo-gitlab-remote
+# Wave: 2 (Remote Configuration)
+# Purpose: Add GitLab as git remote
+
+galaxy_info:
+  role_name: repo-gitlab-remote
+  author: dag-harness
+  description: Add GitLab as git remote (origin or gitlab)
+  license: MIT
+  min_ansible_version: "2.14"
+
+dependencies:
+  - repo-gitlab-create
+
+# Dogfood metadata
+dogfood:
+  type: configure
+  idempotent: true
+  configures:
+    - git_remote

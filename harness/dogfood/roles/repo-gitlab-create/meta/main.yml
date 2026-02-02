@@ -1,0 +1,23 @@
+---
+# Role: repo-gitlab-create
+# Wave: 1 (GitLab Setup)
+# Purpose: Create GitLab project in tinyland/projects/
+
+galaxy_info:
+  role_name: repo-gitlab-create
+  author: dag-harness
+  description: Create GitLab project via API (idempotent)
+  license: MIT
+  min_ansible_version: "2.14"
+
+dependencies:
+  - gitlab-credentials
+
+# Dogfood metadata
+dogfood:
+  type: create
+  idempotent: true
+  requires:
+    - GITLAB_TOKEN
+  creates:
+    - gitlab_project

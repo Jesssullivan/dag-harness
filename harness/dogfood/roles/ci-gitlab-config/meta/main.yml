@@ -1,0 +1,23 @@
+---
+# Role: ci-gitlab-config
+# Wave: 2 (Remote Configuration)
+# Purpose: Create/update .gitlab-ci.yml
+
+galaxy_info:
+  role_name: ci-gitlab-config
+  author: dag-harness
+  description: Create or update GitLab CI configuration
+  license: MIT
+  min_ansible_version: "2.14"
+
+dependencies:
+  - repo-gitlab-create
+
+# Dogfood metadata
+dogfood:
+  type: configure
+  idempotent: true
+  creates:
+    - .gitlab-ci.yml
+  validates:
+    - ci_config_valid

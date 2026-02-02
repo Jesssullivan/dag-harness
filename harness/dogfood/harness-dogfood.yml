@@ -1,0 +1,84 @@
+# Harness Dogfood Configuration
+# Meta-dogfood: dag-harness orchestrating its own infrastructure setup
+#
+# This configuration defines the DAG for setting up dag-harness itself:
+# - GitHub repository verification
+# - GitLab project creation and CI setup
+# - Dual-remote push configuration
+# - CI verification
+
+# Database location for dogfood operations
+db_path: /Users/jsullivan2/git/disposable-dag-langchain/harness/dogfood/dogfood.db
+
+# Path to this repository
+repo_root: /Users/jsullivan2/git/disposable-dag-langchain
+
+# GitLab configuration for dag-harness project
+gitlab:
+  project_path: tinyland/projects/dag-harness
+  group_path: tinyland
+  default_assignee: jsullivan2
+  default_labels:
+    - dogfood
+    - ci
+    - infrastructure
+  default_iteration: Alpha Sprint
+
+# GitHub configuration
+github:
+  repo_owner: tinyland
+  repo_name: dag-harness
+  default_branch: main
+
+# Worktree configuration (for role development)
+worktree:
+  base_path: /Users/jsullivan2/git/dag-harness-worktrees
+  branch_prefix: dogfood/
+
+# Testing configuration
+testing:
+  molecule_required: false  # These are infrastructure roles, not Ansible
+  pytest_required: true     # Run harness tests after each wave
+  molecule_timeout: 300
+  pytest_timeout: 600
+
+# Wave definitions for meta-dogfood DAG
+# Each wave completes before the next begins
+waves:
+  0:
+    name: Credentials & Verification
+    description: Verify credentials and existing infrastructure
+    roles:
+      - gitlab-credentials      # Verify GITLAB_TOKEN is valid
+      - repo-github-verify      # Verify GitHub origin exists
+  1:
+    name: GitLab Setup
+    description: Create and configure GitLab project
+    roles:
+      - repo-gitlab-create      # Create tinyland/projects/dag-harness
+  2:
+    name: Remote Configuration
+    description: Configure git remotes and CI
+    roles:
+      - repo-gitlab-remote      # Add GitLab as remote
+      - ci-gitlab-config        # Create/update .gitlab-ci.yml
+  3:
+    name: Push & Sync
+    description: Push to GitLab and sync branches
+    roles:
+      - repo-push-gitlab        # Push all branches to GitLab
+  4:
+    name: CI Verification
+    description: Verify CI pipeline passes
+    roles:
+      - ci-gitlab-verify        # Verify pipeline status
+      - repo-github-sync        # Optional: sync back to GitHub
+
+# Dogfood-specific settings
+dogfood:
+  # Skip roles that are already complete
+  skip_completed: true
+  # Report on completion status
+  generate_report: true
+  # Update ALPHA_SPRINT_PLAN.md on completion
+  update_sprint_plan: true

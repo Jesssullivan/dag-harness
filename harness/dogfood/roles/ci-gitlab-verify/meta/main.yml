@@ -1,0 +1,23 @@
+---
+# Role: ci-gitlab-verify
+# Wave: 4 (CI Verification)
+# Purpose: Verify GitLab CI pipeline passes
+
+galaxy_info:
+  role_name: ci-gitlab-verify
+  author: dag-harness
+  description: Verify GitLab CI pipeline runs and passes
+  license: MIT
+  min_ansible_version: "2.14"
+
+dependencies:
+  - repo-push-gitlab
+
+# Dogfood metadata
+dogfood:
+  type: verification
+  idempotent: true
+  requires:
+    - GITLAB_TOKEN
+  validates:
+    - pipeline_success

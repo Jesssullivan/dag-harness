@@ -1,0 +1,24 @@
+---
+# Role: gitlab-credentials
+# Wave: 0 (Foundation)
+# Purpose: Verify GitLab credentials are valid and have required scopes
+
+galaxy_info:
+  role_name: gitlab-credentials
+  author: dag-harness
+  description: Verify GitLab API token is valid and has required scopes
+  license: MIT
+  min_ansible_version: "2.14"
+
+dependencies: []
+
+# Dogfood metadata
+dogfood:
+  type: verification
+  idempotent: true
+  requires:
+    - GITLAB_TOKEN
+  validates:
+    - api_access
+    - project_access
+    - ci_access
