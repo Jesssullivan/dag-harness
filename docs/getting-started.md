@@ -181,4 +181,4 @@ harness bootstrap
 
 - Read the [Architecture](architecture.md) guide
 - Explore [CLI commands](api/cli.md)
-- Set up [HOTL mode](../vignettes/02-hotl-autonomous.md) for autonomous operation
+- Learn about HOTL (Human Out of The Loop) mode via `harness hotl --help`
