@@ -14,16 +14,18 @@ variables:
   GIT_CLONE_PATH: "$CI_BUILDS_DIR/$CI_CONCURRENT_ID/$CI_PROJECT_NAME"
   GIT_CLEAN_FLAGS: "-ffdx"
 
-# Cache Python dependencies (keyed by pyproject.toml hash)
+# Cache Python dependencies (keyed by pyproject.toml + uv.lock hash)
 .uv-cache: &uv-cache
   cache:
     key:
       files:
         - harness/pyproject.toml
+        - harness/uv.lock
       prefix: "uv-$CI_JOB_NAME"
     paths:
       - .cache/uv
       - harness/.venv
+    policy: pull-push
 
 # Use local docker runners via lima VM
 .local-runner: &local-runner
@@ -41,7 +43,7 @@ test:
   script:
     - pip install uv
     - cd harness
-    - uv sync --extra dev
+    - uv sync --extra dev || (rm -rf .venv && uv sync --extra dev)
     - uv run pytest -v --cov=harness --cov-report=xml --cov-report=term-missing
   coverage: '/TOTAL\s+\d+\s+\d+\s+(\d+%)/'
   artifacts:
@@ -63,7 +65,7 @@ lint:
   script:
     - pip install uv
     - cd harness
-    - uv sync --extra dev
+    - uv sync --extra dev || (rm -rf .venv && uv sync --extra dev)
     - uv run ruff check harness/ tests/
     - uv run ruff format --check harness/ tests/
   rules:
@@ -79,7 +81,7 @@ test-pbt:
   script:
     - pip install uv
     - cd harness
-    - uv sync --extra dev
+    - uv sync --extra dev || (rm -rf .venv && uv sync --extra dev)
     - uv run pytest -m pbt --hypothesis-show-statistics -v
   allow_failure: true
   rules:
