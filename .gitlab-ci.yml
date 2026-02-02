@@ -10,6 +10,9 @@ variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
   UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
   PYTHON_VERSION: "3.12"
+  # Unique clone path per job to avoid git lock conflicts on concurrent runners
+  GIT_CLONE_PATH: "$CI_BUILDS_DIR/$CI_CONCURRENT_ID/$CI_PROJECT_NAME"
+  GIT_CLEAN_FLAGS: "-ffdx"
 
 # Cache Python dependencies
 .uv-cache: &uv-cache
