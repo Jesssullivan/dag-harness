@@ -43,6 +43,14 @@ from harness.hooks.file_tracker import (
     FileChangeType,
     TrackedFile,
 )
+from harness.hooks.tool_logger import (
+    DANGEROUS_PATTERNS,
+    check_capability,
+    get_dangerous_pattern,
+    log_blocked_invocation,
+    log_tool_invocation,
+    track_file_change,
+)
 from harness.hooks.verification import (
     VerificationHook,
     VerificationResult,
@@ -70,6 +78,13 @@ __all__ = [
     "FileChangeTrackerHook",
     "FileChangeType",
     "TrackedFile",
+    # Tool logger
+    "DANGEROUS_PATTERNS",
+    "check_capability",
+    "get_dangerous_pattern",
+    "log_blocked_invocation",
+    "log_tool_invocation",
+    "track_file_change",
     # Verification hooks
     "VerificationHook",
     "VerificationResult",

@@ -582,23 +582,107 @@ def mcp_server():
 
 @app.command("init")
 def init(
-    config_path: str = typer.Option("harness.yml", "--config", "-c", help="Path to save config"),
+    repo_root: Path | None = typer.Option(None, "--repo-root", help="Repository root path"),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing configuration"),
+    no_detect_roles: bool = typer.Option(
+        False, "--no-detect-roles", help="Skip automatic role detection"
+    ),
+    config_path: str | None = typer.Option(
+        None, "--config", "-c", help="Path to save config file"
+    ),
 ):
-    """Initialize harness configuration."""
-    config = HarnessConfig()
+    """Initialize harness in a repository.
 
-    # Check if we're in the right directory
-    if not Path("ansible/roles").exists():
-        console.print(
-            "[yellow]Warning: ansible/roles not found. Are you in the EMS repo root?[/yellow]"
+    Detects the git repository root, creates .harness/ directory,
+    initializes the database, generates harness.yml, detects Ansible
+    roles, and updates .gitignore.
+
+    Examples:
+        harness init                          # Auto-detect everything
+        harness init --repo-root /path/to/repo
+        harness init --force                  # Overwrite existing config
+        harness init --no-detect-roles        # Skip role scanning
+    """
+    from harness.bootstrap.init import init_harness
+
+    try:
+        result = init_harness(
+            repo_root=repo_root,
+            force=force,
+            no_detect_roles=no_detect_roles,
+            config_path=config_path,
         )
+    except RuntimeError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1)
 
-    config.save(config_path)
-    console.print(f"[green]Configuration saved to {config_path}[/green]")
+    console.print(f"[green]Repository root:[/green] {result['repo_root']}")
+    console.print(f"[green]Harness directory:[/green] {result['harness_dir']}")
+    console.print(f"[green]Database:[/green] {result['db_path']}")
 
-    # Initialize database
-    StateDB(config.db_path)
-    console.print(f"[green]Database initialized at {config.db_path}[/green]")
+    if result["config_created"]:
+        console.print(f"[green]Config created:[/green] {result['config_path']}")
+    else:
+        console.print(f"[dim]Config already exists:[/dim] {result['config_path']}")
+
+    if result["roles_detected"]:
+        console.print(
+            f"[green]Roles detected:[/green] {len(result['roles_detected'])} "
+            f"({', '.join(result['roles_detected'][:5])}"
+            f"{'...' if len(result['roles_detected']) > 5 else ''})"
+        )
+    else:
+        console.print("[yellow]No roles detected in ansible/roles/[/yellow]")
+
+    if result["gitignore_updated"]:
+        console.print("[green].gitignore updated with .harness/ entries[/green]")
+    else:
+        console.print("[dim].gitignore already has .harness/ entries[/dim]")
+
+
+@app.command("config")
+def config_cmd(
+    validate: bool = typer.Option(False, "--validate", "-v", help="Validate configuration"),
+    schema: bool = typer.Option(False, "--schema", "-s", help="Output JSON Schema"),
+    path: str | None = typer.Option(None, "--path", "-p", help="Config file path"),
+):
+    """Validate configuration or output JSON schema.
+
+    Examples:
+        harness config --validate                # Validate harness.yml
+        harness config --validate --path my.yml  # Validate specific file
+        harness config --schema                  # Output JSON Schema
+    """
+    from harness.config import HarnessConfigModel
+
+    if schema:
+        schema_dict = HarnessConfigModel.model_json_schema()
+        print(json.dumps(schema_dict, indent=2))
+        return
+
+    if validate:
+        config_path = path or "harness.yml"
+        try:
+            cfg = HarnessConfigModel.from_yaml(config_path)
+            console.print(f"[green]Configuration valid:[/green] {config_path}")
+            console.print(f"  Project: {cfg.project_name}")
+            console.print(f"  GitLab: {cfg.gitlab.project_path}")
+            console.print(f"  Waves: {len(cfg.waves)}")
+            console.print(f"  DB: {cfg.db_path}")
+            console.print(f"  Log level: {cfg.log_level}")
+            if cfg.waves:
+                total_roles = sum(len(w.roles) for w in cfg.waves)
+                console.print(f"  Total roles: {total_roles}")
+        except FileNotFoundError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
+        except Exception as e:
+            console.print(f"[red]Validation error:[/red] {e}")
+            raise typer.Exit(1)
+        return
+
+    # Default: show current config summary
+    console.print("[dim]Use --validate to validate config, --schema for JSON Schema[/dim]")
 
 
 @app.command("graph")
@@ -798,6 +882,106 @@ def db_info():
     console.print(f"[bold]Indexes:[/bold] {schema['index_count']}")
     console.print(
         f"[bold]Schema Valid:[/bold] {'[green]Yes[/green]' if schema['valid'] else '[red]No[/red]'}"
+    )
+
+
+@db_app.command("migrate")
+def db_migrate(
+    target: int | None = typer.Option(None, "--target", "-t", help="Target migration version"),
+    show_status: bool = typer.Option(False, "--status", "-s", help="Show migration status"),
+    rollback_to: int | None = typer.Option(
+        None, "--rollback", "-r", help="Rollback to target version"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Run database schema migrations.
+
+    Applies pending migrations to bring the database up to the latest version.
+    Use --status to see current migration state, --target to migrate to a
+    specific version, or --rollback to reverse migrations.
+
+    Examples:
+        harness db migrate              # Apply all pending migrations
+        harness db migrate --status     # Show migration status
+        harness db migrate --target 2   # Migrate to version 2
+        harness db migrate --rollback 1 # Roll back to version 1
+    """
+    from harness.db.migrations import MigrationRunner
+
+    config = HarnessConfig.load()
+    runner = MigrationRunner(config.db_path)
+
+    if show_status:
+        status_info = runner.status()
+
+        if json_output:
+            print(json.dumps(status_info, indent=2, default=str))
+            return
+
+        console.print(f"\n[bold]Migration Status[/bold]")
+        console.print(f"  Current version: {status_info['current_version']}")
+        console.print(
+            f"  Applied: {status_info['applied_count']}/{status_info['total_migrations']}"
+        )
+        console.print(f"  Pending: {status_info['pending_count']}")
+
+        if status_info["applied"]:
+            console.print("\n[bold]Applied migrations:[/bold]")
+            for m in status_info["applied"]:
+                console.print(
+                    f"  [green]v{m['version']}[/green] {m['description']} ({m['applied_at']})"
+                )
+
+        if status_info["pending"]:
+            console.print("\n[bold]Pending migrations:[/bold]")
+            for m in status_info["pending"]:
+                console.print(f"  [yellow]v{m['version']}[/yellow] {m['description']}")
+
+        return
+
+    if rollback_to is not None:
+        current = runner.get_current_version()
+        if rollback_to >= current:
+            console.print(
+                f"[yellow]Target version {rollback_to} is not below current version {current}[/yellow]"
+            )
+            return
+
+        console.print(
+            f"[blue]Rolling back from version {current} to {rollback_to}...[/blue]"
+        )
+        results = runner.rollback(rollback_to)
+
+        if json_output:
+            print(json.dumps(results, indent=2))
+            return
+
+        for msg in results:
+            console.print(f"  [yellow]{msg}[/yellow]")
+
+        console.print(
+            f"\n[green]Rollback complete. Now at version {runner.get_current_version()}[/green]"
+        )
+        return
+
+    # Apply migrations
+    pending = runner.get_pending()
+    if not pending:
+        console.print("[green]Database is up to date. No pending migrations.[/green]")
+        return
+
+    console.print(f"[blue]Applying {len(pending)} pending migration(s)...[/blue]")
+    results = runner.migrate(target=target)
+
+    if json_output:
+        print(json.dumps(results, indent=2))
+        return
+
+    for msg in results:
+        console.print(f"  [green]{msg}[/green]")
+
+    console.print(
+        f"\n[green]Migration complete. Now at version {runner.get_current_version()}[/green]"
     )
 
 
@@ -1503,8 +1687,65 @@ def hotl_start(
         None, "--email", envvar="HOTL_EMAIL_TO", help="Email recipient"
     ),
     background: bool = typer.Option(False, "--background", "-b", help="Run in background"),
+    waves: str | None = typer.Option(
+        None, "--waves", "-w", help="Comma-separated wave numbers to process (e.g. '1,2,3')"
+    ),
+    max_concurrent: int = typer.Option(
+        2, "--max-concurrent", "-j", help="Maximum concurrent role processing"
+    ),
 ):
-    """Start HOTL autonomous operation mode."""
+    """Start HOTL autonomous operation mode.
+
+    Without --waves, runs the standard supervisor loop. With --waves,
+    uses the wave-based orchestrator to process roles from the specified
+    waves through box-up-role workflows.
+
+    Examples:
+        harness hotl start                         # Standard supervisor
+        harness hotl start --waves 1               # Process wave 1 roles
+        harness hotl start --waves 1,2 -j 3        # Waves 1-2, 3 concurrent
+    """
+    if waves:
+        # Wave-based orchestrator mode
+        from harness.hotl.orchestrator import HOTLOrchestrator
+        from harness.hotl.queue import RoleQueue
+
+        db = get_db()
+        harness_config = HarnessConfig.load()
+        orch_config = {
+            "repo_root": harness_config.repo_root,
+            "repo_python": harness_config.repo_python,
+        }
+
+        queue = RoleQueue(db, max_concurrent=max_concurrent)
+        orchestrator = HOTLOrchestrator(db, config=orch_config, queue=queue)
+
+        wave_list = [int(w.strip()) for w in waves.split(",")]
+
+        console.print("[bold blue]Starting HOTL Orchestrator Mode[/bold blue]")
+        console.print(f"  Waves: {wave_list}")
+        console.print(f"  Max concurrent: {max_concurrent}")
+        console.print()
+
+        try:
+            asyncio.run(orchestrator.start(waves=wave_list, max_concurrent=max_concurrent))
+
+            console.print("\n[bold green]HOTL orchestrator completed[/bold green]")
+            queue_status = queue.get_status()
+            console.print(f"  Completed: {queue_status.get('completed', 0)}")
+            console.print(f"  Failed: {queue_status.get('failed', 0)}")
+            console.print(f"  Skipped: {queue_status.get('skipped', 0)}")
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]HOTL orchestrator interrupted by user[/yellow]")
+            raise typer.Exit(130)
+        except Exception as e:
+            console.print(f"\n[red]HOTL orchestrator error: {e}[/red]")
+            raise typer.Exit(1)
+
+        return
+
+    # Standard supervisor mode
     from harness.hotl.supervisor import HOTLSupervisor
 
     db = get_db()
@@ -1611,6 +1852,93 @@ def hotl_stop(
     else:
         console.print("[dim]HOTL stop works by pressing Ctrl+C in the running session.[/dim]")
         console.print("[dim]Use --force to cancel running executions in the database.[/dim]")
+
+
+@hotl_app.command("approve")
+def hotl_approve(
+    role_name: str = typer.Argument(..., help="Role name to approve"),
+):
+    """Approve a paused role workflow to continue processing.
+
+    When a role workflow pauses for human approval, use this command
+    to approve it and allow processing to continue.
+
+    Examples:
+        harness hotl approve common
+        harness hotl approve ems_web_app
+    """
+    from harness.hotl.orchestrator import HOTLOrchestrator
+    from harness.hotl.queue import QueueItemStatus, RoleQueue
+
+    db = get_db()
+
+    # Check for paused executions for this role
+    with db.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT we.id, we.status, r.name
+            FROM workflow_executions we
+            JOIN roles r ON we.role_id = r.id
+            WHERE r.name = ? AND we.status = 'paused'
+            ORDER BY we.id DESC LIMIT 1
+            """,
+            (role_name,),
+        ).fetchone()
+
+    if row:
+        # Resume via the standard resume mechanism
+        from harness.db.models import WorkflowStatus
+
+        db.update_execution_status(row["id"], WorkflowStatus.RUNNING)
+        console.print(f"[green]Approved role '{role_name}' (execution {row['id']})[/green]")
+    else:
+        console.print(f"[yellow]No paused execution found for '{role_name}'[/yellow]")
+        console.print("[dim]This command works with the HOTL orchestrator queue.[/dim]")
+
+
+@hotl_app.command("reject")
+def hotl_reject(
+    role_name: str = typer.Argument(..., help="Role name to reject"),
+    reason: str = typer.Option("", "--reason", "-r", help="Reason for rejection"),
+):
+    """Reject a paused role workflow and skip it.
+
+    When a role workflow pauses for human approval, use this command
+    to reject it. The role will be marked as skipped and the queue
+    will continue with the next role.
+
+    Examples:
+        harness hotl reject common --reason "Tests need more coverage"
+        harness hotl reject ems_web_app -r "Not ready"
+    """
+    db = get_db()
+
+    with db.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT we.id, we.status, r.name
+            FROM workflow_executions we
+            JOIN roles r ON we.role_id = r.id
+            WHERE r.name = ? AND we.status = 'paused'
+            ORDER BY we.id DESC LIMIT 1
+            """,
+            (role_name,),
+        ).fetchone()
+
+    if row:
+        from harness.db.models import WorkflowStatus
+
+        db.update_execution_status(
+            row["id"],
+            WorkflowStatus.CANCELLED,
+            error_message=reason or "Rejected by user",
+        )
+        console.print(f"[yellow]Rejected role '{role_name}' (execution {row['id']})[/yellow]")
+        if reason:
+            console.print(f"  Reason: {reason}")
+    else:
+        console.print(f"[yellow]No paused execution found for '{role_name}'[/yellow]")
+        console.print("[dim]This command works with the HOTL orchestrator queue.[/dim]")
 
 
 @hotl_app.command("resume")

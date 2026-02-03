@@ -746,6 +746,11 @@ class CheckpointerContext:
         async with CheckpointerContext() as checkpointer:
             compiled = graph.compile(checkpointer=checkpointer)
             await compiled.ainvoke(...)
+
+    For unified checkpointing with StateDB sync, use UnifiedCheckpointerContext instead:
+        from harness.dag.checkpointer_unified import UnifiedCheckpointerContext
+        async with UnifiedCheckpointerContext(db) as checkpointer:
+            ...
     """
 
     def __init__(

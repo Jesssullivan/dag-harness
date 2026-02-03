@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-02-03
+
+### Added
+
+- LangGraph workflow engine with 15-node box-up-role graph
+- Unified checkpointing (LangGraph + StateDB)
+- Cross-thread memory via HarnessStore
+- GitLab integration with idempotency, retry, merge trains
+- Database migration system (3 migrations)
+- Pydantic configuration validation
+- HOTL mode with wave-based queue
+- Bootstrap `harness init` command
+- Claude Code skill integration
+- Comprehensive test suite (500+ tests)
+- CI/CD release automation (GitHub Actions + GitLab CI)
+- Conventional commits tooling (commitizen)
+
+### Changed
+
+- Version bump from 0.2.0 to 0.3.0
+- Package data now includes schema.sql and templates
+
+### Fixed
+
+- StateDB connection pattern uses context manager
+- LangGraph checkpoint serialization for complex state
+
 ## [0.2.0] - 2026-01-30
 
 ### Added

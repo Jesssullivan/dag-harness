@@ -6,9 +6,14 @@ Tests cover:
 - FileChangeTrackerHook
 - AuditHook and AuditLogger
 - VerificationHook
+- ToolLogger (database-backed audit trail)
+- Pre/Post tool use hook scripts (Claude Code protocol)
 """
 
 import json
+import os
+import subprocess
+import sys
 from datetime import datetime
 
 import pytest
@@ -862,3 +867,432 @@ class TestVerificationFunctions:
 
         assert result.status == VerificationStatus.FAILED
         assert "missing.txt" in result.errors[0]
+
+
+# ============================================================================
+# TOOL LOGGER TESTS
+# ============================================================================
+
+
+class TestToolLogger:
+    """Tests for the tool_logger module (database-backed audit trail)."""
+
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        """Create a temporary database path for tool logger tests."""
+        db_dir = tmp_path / ".harness"
+        db_dir.mkdir()
+        return str(db_dir / "harness.db")
+
+    def test_log_tool_invocation(self, db_path):
+        """Test that log_tool_invocation writes to the database correctly."""
+        from harness.hooks.tool_logger import log_tool_invocation
+
+        row_id = log_tool_invocation(
+            tool_name="Bash",
+            tool_input={"command": "git status"},
+            phase="pre",
+            db_path=db_path,
+        )
+
+        assert row_id is not None
+        assert row_id > 0
+
+        # Verify record exists in database
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM tool_invocations WHERE id = ?", (row_id,)
+        ).fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row["tool_name"] == "Bash"
+        assert row["status"] == "pending"
+        assert '"command": "git status"' in row["arguments"]
+
+    def test_log_tool_invocation_post_phase(self, db_path):
+        """Test that post-phase logging updates the pending record."""
+        from harness.hooks.tool_logger import log_tool_invocation
+
+        # First create a pre record
+        pre_id = log_tool_invocation(
+            tool_name="Write",
+            tool_input={"file_path": "/tmp/test.txt"},
+            phase="pre",
+            db_path=db_path,
+        )
+        assert pre_id is not None
+
+        # Then log the post phase
+        post_id = log_tool_invocation(
+            tool_name="Write",
+            tool_input={"file_path": "/tmp/test.txt"},
+            phase="post",
+            result="File written successfully",
+            db_path=db_path,
+        )
+
+        assert post_id == pre_id  # Should update the same record
+
+        # Verify the record was updated
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM tool_invocations WHERE id = ?", (pre_id,)
+        ).fetchone()
+        conn.close()
+
+        assert row["status"] == "completed"
+        assert row["result"] == "File written successfully"
+        assert row["completed_at"] is not None
+
+    def test_check_capability_allows(self):
+        """Test that normal operations are allowed."""
+        from harness.hooks.tool_logger import check_capability
+
+        # Normal bash commands should be allowed
+        assert check_capability("Bash", {"command": "git status"}) is True
+        assert check_capability("Bash", {"command": "ls -la"}) is True
+        assert check_capability("Bash", {"command": "npm run test"}) is True
+
+        # Non-Bash tools should always be allowed
+        assert check_capability("Write", {"file_path": "/tmp/test.txt"}) is True
+        assert check_capability("Edit", {"file_path": "/tmp/test.txt"}) is True
+        assert check_capability("Read", {"file_path": "/tmp/test.txt"}) is True
+
+    def test_check_capability_blocks_dangerous(self):
+        """Test that dangerous commands are blocked without capability."""
+        from harness.hooks.tool_logger import check_capability
+
+        # Should block dangerous patterns
+        assert check_capability("Bash", {"command": "rm -rf /"}) is False
+        assert check_capability("Bash", {"command": "git push --force origin main"}) is False
+        assert check_capability("Bash", {"command": "DROP TABLE users;"}) is False
+        assert check_capability("Bash", {"command": "git reset --hard HEAD~5"}) is False
+
+    def test_check_capability_allows_with_grant(self):
+        """Test that dangerous commands are allowed with explicit capability."""
+        from harness.hooks.tool_logger import check_capability
+
+        # With destructive capability, dangerous patterns should be allowed
+        assert (
+            check_capability("Bash", {"command": "rm -rf /tmp/old"}, ["destructive"])
+            is True
+        )
+        assert (
+            check_capability(
+                "Bash", {"command": "git push --force"}, ["destructive"]
+            )
+            is True
+        )
+
+    def test_track_file_change(self, db_path):
+        """Test that file changes are recorded in the database."""
+        from harness.hooks.tool_logger import track_file_change
+
+        row_id = track_file_change(
+            file_path="/tmp/test.txt",
+            change_type="create",
+            tool_name="Write",
+            db_path=db_path,
+        )
+
+        assert row_id is not None
+        assert row_id > 0
+
+        # Verify in database
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM file_changes WHERE id = ?", (row_id,)
+        ).fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row["file_path"] == "/tmp/test.txt"
+        assert row["change_type"] == "create"
+        assert row["tool_name"] == "Write"
+
+    def test_track_file_change_invalid_type(self, db_path):
+        """Test that invalid change types are rejected."""
+        from harness.hooks.tool_logger import track_file_change
+
+        row_id = track_file_change(
+            file_path="/tmp/test.txt",
+            change_type="invalid",
+            db_path=db_path,
+        )
+
+        assert row_id is None
+
+    def test_log_blocked_invocation(self, db_path):
+        """Test logging a blocked tool invocation."""
+        from harness.hooks.tool_logger import log_blocked_invocation
+
+        row_id = log_blocked_invocation(
+            tool_name="Bash",
+            tool_input={"command": "rm -rf /"},
+            reason="Blocked: rm -rf",
+            db_path=db_path,
+        )
+
+        assert row_id is not None
+
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM tool_invocations WHERE id = ?", (row_id,)
+        ).fetchone()
+        conn.close()
+
+        assert row["status"] == "blocked"
+        assert row["blocked_reason"] == "Blocked: rm -rf"
+
+    def test_get_dangerous_pattern(self):
+        """Test dangerous pattern detection."""
+        from harness.hooks.tool_logger import get_dangerous_pattern
+
+        assert get_dangerous_pattern("rm -rf /tmp/old") == "rm -rf"
+        assert get_dangerous_pattern("git push --force") == "git push --force"
+        assert get_dangerous_pattern("DROP TABLE users") == "DROP TABLE"
+        assert get_dangerous_pattern("git status") is None
+        assert get_dangerous_pattern("ls -la") is None
+
+
+# ============================================================================
+# PRE/POST HOOK SCRIPT TESTS
+# ============================================================================
+
+
+class TestPreToolUseScript:
+    """Tests for the pre_tool_use.py hook script."""
+
+    def test_pre_hook_allows_normal(self, tmp_path):
+        """Test that pre-hook exits 0 for normal tool invocations."""
+        import subprocess
+
+        hook_data = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+        })
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "harness.hooks.pre_tool_use",
+            ],
+            input=hook_data,
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env={**os.environ, "HARNESS_DB_PATH": str(tmp_path / "harness.db")},
+        )
+
+        assert result.returncode == 0
+
+    def test_pre_hook_blocks_dangerous(self, tmp_path):
+        """Test that pre-hook exits 2 for dangerous commands."""
+        import subprocess
+
+        hook_data = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /important/data"},
+        })
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "harness.hooks.pre_tool_use",
+            ],
+            input=hook_data,
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env={**os.environ, "HARNESS_DB_PATH": str(tmp_path / "harness.db")},
+        )
+
+        assert result.returncode == 2
+        output = json.loads(result.stdout)
+        assert output["blocked"] is True
+        assert "rm -rf" in output["reason"]
+
+    def test_pre_hook_allows_write_tool(self, tmp_path):
+        """Test that pre-hook allows non-Bash tools."""
+        import subprocess
+
+        hook_data = json.dumps({
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/test.txt", "content": "hello"},
+        })
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "harness.hooks.pre_tool_use",
+            ],
+            input=hook_data,
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env={**os.environ, "HARNESS_DB_PATH": str(tmp_path / "harness.db")},
+        )
+
+        assert result.returncode == 0
+
+    def test_pre_hook_handles_empty_input(self, tmp_path):
+        """Test that pre-hook handles empty stdin gracefully."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "harness.hooks.pre_tool_use",
+            ],
+            input="",
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env={**os.environ, "HARNESS_DB_PATH": str(tmp_path / "harness.db")},
+        )
+
+        assert result.returncode == 0
+
+
+class TestPostToolUseScript:
+    """Tests for the post_tool_use.py hook script."""
+
+    def test_post_hook_logs_result(self, tmp_path):
+        """Test that post-hook logs tool results and exits 0."""
+        import subprocess
+
+        db_path = str(tmp_path / "harness.db")
+        hook_data = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_output": "On branch main\nnothing to commit",
+        })
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "harness.hooks.post_tool_use",
+            ],
+            input=hook_data,
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env={**os.environ, "HARNESS_DB_PATH": db_path},
+        )
+
+        assert result.returncode == 0
+
+    def test_post_hook_tracks_file_write(self, tmp_path):
+        """Test that post-hook tracks Write tool file changes."""
+        import sqlite3
+        import subprocess
+
+        db_path = str(tmp_path / "harness.db")
+        hook_data = json.dumps({
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/new_file.py", "content": "print('hello')"},
+            "tool_output": "File written",
+        })
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "harness.hooks.post_tool_use",
+            ],
+            input=hook_data,
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env={**os.environ, "HARNESS_DB_PATH": db_path},
+        )
+
+        assert result.returncode == 0
+
+        # Verify file change was tracked
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM file_changes").fetchall()
+        conn.close()
+
+        assert len(rows) >= 1
+        file_change = rows[0]
+        assert file_change["file_path"] == "/tmp/new_file.py"
+        assert file_change["change_type"] == "create"
+        assert file_change["tool_name"] == "Write"
+
+    def test_post_hook_tracks_edit_tool(self, tmp_path):
+        """Test that post-hook tracks Edit tool file changes."""
+        import sqlite3
+        import subprocess
+
+        db_path = str(tmp_path / "harness.db")
+        hook_data = json.dumps({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "/tmp/existing.py",
+                "old_string": "foo",
+                "new_string": "bar",
+            },
+            "tool_output": "Edit applied",
+        })
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "harness.hooks.post_tool_use",
+            ],
+            input=hook_data,
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env={**os.environ, "HARNESS_DB_PATH": db_path},
+        )
+
+        assert result.returncode == 0
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM file_changes").fetchall()
+        conn.close()
+
+        assert len(rows) >= 1
+        assert rows[0]["change_type"] == "edit"
+
+    def test_post_hook_handles_empty_input(self, tmp_path):
+        """Test that post-hook handles empty stdin gracefully."""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "harness.hooks.post_tool_use",
+            ],
+            input="",
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env={**os.environ, "HARNESS_DB_PATH": str(tmp_path / "harness.db")},
+        )
+
+        assert result.returncode == 0

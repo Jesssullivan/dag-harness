@@ -42,6 +42,61 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
+
+# =============================================================================
+# CUSTOM REDUCERS
+# =============================================================================
+
+
+def keep_last_n(n: int) -> Callable[[list, list], list]:
+    """
+    Create a reducer that keeps only the last N items.
+
+    Useful for state_snapshots and similar fields where we want a rolling
+    history without unbounded growth.
+
+    Args:
+        n: Maximum number of items to keep.
+
+    Returns:
+        A reducer function compatible with LangGraph's Annotated pattern.
+
+    Usage:
+        state_snapshots: Annotated[list[dict], keep_last_n(10)]
+    """
+
+    def reducer(current: list | None, new: list | None) -> list:
+        current = current or []
+        new = new or []
+        combined = current + new
+        return combined[-n:] if len(combined) > n else combined
+
+    return reducer
+
+
+# =============================================================================
+# STATIC BREAKPOINTS (Task #23 - Week 1 Day 5)
+# =============================================================================
+
+# Default breakpoints for the box-up-role workflow.
+# These nodes will automatically pause execution when breakpoints are enabled,
+# allowing operators to review state before critical operations.
+DEFAULT_BREAKPOINTS: list[str] = [
+    "human_approval",  # Always pause before human approval (redundant with interrupt())
+    "create_mr",  # Pause before creating merge request
+    "add_to_merge_train",  # Pause before adding to merge train
+]
+
+# Environment variable to enable static breakpoints
+# Set HARNESS_BREAKPOINTS=true to enable automatic pausing at breakpoints
+BREAKPOINTS_ENV_VAR = "HARNESS_BREAKPOINTS"
+
+
+def get_breakpoints_enabled() -> bool:
+    """Check if static breakpoints are enabled via environment variable."""
+    import os
+    return os.environ.get(BREAKPOINTS_ENV_VAR, "").lower() in ("true", "1", "yes")
+
 import httpx
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -54,6 +109,7 @@ from langgraph.types import (  # noqa: F401 (Command re-exported)
 )
 
 from harness.config import NotificationConfig
+from harness.dag.store import HarnessStore
 from harness.db.models import TestType, WorkflowStatus
 from harness.db.state import StateDB
 from harness.notifications import (
@@ -179,6 +235,16 @@ class BoxUpRoleState(TypedDict, total=False):
     current_node: str
     completed_nodes: Annotated[list[str], operator.add]
     errors: Annotated[list[str], operator.add]
+
+    # Extended observability (Task #23 - Week 1 Day 4)
+    # These reducers accumulate detailed operation logs for debugging and auditing
+    test_results: Annotated[list[dict], operator.add]  # Individual test execution records
+    git_operations: Annotated[list[str], operator.add]  # Git command history
+    api_calls: Annotated[list[dict], operator.add]  # External API call records
+    timing_metrics: Annotated[list[dict], operator.add]  # Performance timing data
+
+    # State snapshots with bounded history (keep last 10 snapshots)
+    state_snapshots: Annotated[list[dict], keep_last_n(10)]
 
     # Final summary
     summary: dict | None
@@ -1481,8 +1547,10 @@ GIT_RETRY_POLICY = RetryPolicy(
 
 
 def create_box_up_role_graph(
-    db_path: str = "harness.db", parallel_tests: bool = True
-) -> StateGraph:
+    db_path: str = "harness.db",
+    parallel_tests: bool = True,
+    enable_breakpoints: bool | None = None,
+) -> tuple[StateGraph, list[str]]:
     """
     Create the LangGraph-based box-up-role workflow.
 
@@ -1493,11 +1561,19 @@ def create_box_up_role_graph(
     - All gates (molecule, pytest, deploy)
     - RetryPolicy for external API and subprocess nodes (LangGraph 1.0.x)
     - Parallel test execution via Send API (Task #21)
+    - Static breakpoints via interrupt_before (Task #23)
 
     Args:
         db_path: Path to the SQLite database for checkpointing
         parallel_tests: If True (default), run molecule and pytest in parallel.
                        If False, run tests sequentially for debugging.
+        enable_breakpoints: If True, return breakpoint nodes for interrupt_before.
+                           If None, check HARNESS_BREAKPOINTS env var.
+                           If False, return empty breakpoints list.
+
+    Returns:
+        Tuple of (StateGraph, breakpoint_nodes) where breakpoint_nodes is
+        a list of node names to pass to compile(interrupt_before=...).
 
     Graph Structure (parallel_tests=True):
         validate_role -> analyze_deps -> check_reverse_deps -> create_worktree
@@ -1596,20 +1672,39 @@ def create_box_up_role_graph(
     graph.add_edge("report_summary", END)
     graph.add_edge("notify_failure", END)
 
-    return graph
+    # Determine breakpoints
+    if enable_breakpoints is None:
+        enable_breakpoints = get_breakpoints_enabled()
+
+    breakpoints = DEFAULT_BREAKPOINTS if enable_breakpoints else []
+
+    return graph, breakpoints
 
 
-async def create_compiled_graph(db_path: str = "harness.db"):
+async def create_compiled_graph(
+    db_path: str = "harness.db",
+    enable_breakpoints: bool | None = None,
+):
     """
     Create and compile the graph with SqliteSaver checkpointer.
 
+    Args:
+        db_path: Path to SQLite database for checkpointing.
+        enable_breakpoints: If True, enable static breakpoints (interrupt_before).
+                           If None, check HARNESS_BREAKPOINTS env var.
+
     Returns a compiled graph that can be executed with .ainvoke().
     """
-    graph = create_box_up_role_graph(db_path)
+    graph, breakpoints = create_box_up_role_graph(
+        db_path, enable_breakpoints=enable_breakpoints
+    )
 
     # Create async SQLite checkpointer
     async with AsyncSqliteSaver.from_conn_string(db_path) as checkpointer:
-        compiled = graph.compile(checkpointer=checkpointer)
+        compile_kwargs = {"checkpointer": checkpointer}
+        if breakpoints:
+            compile_kwargs["interrupt_before"] = breakpoints
+        compiled = graph.compile(**compile_kwargs)
         return compiled
 
 
@@ -1652,6 +1747,7 @@ class LangGraphWorkflowRunner:
         checkpointer_factory: Any | None = None,
         postgres_url: str | None = None,
         use_postgres: bool = False,
+        store: HarnessStore | None = None,
     ):
         """
         Initialize the workflow runner.
@@ -1663,6 +1759,7 @@ class LangGraphWorkflowRunner:
             checkpointer_factory: Optional CheckpointerFactory class for custom checkpointer
             postgres_url: Optional PostgreSQL URL (overrides environment)
             use_postgres: If True, prefer PostgreSQL from environment variable
+            store: Optional HarnessStore for cross-thread memory persistence
         """
         self.db = db
         self.db_path = db_path
@@ -1671,6 +1768,7 @@ class LangGraphWorkflowRunner:
         self._checkpointer_factory = checkpointer_factory
         self._postgres_url = postgres_url
         self._use_postgres = use_postgres or postgres_url is not None
+        self._store = store
         # Set module-level db for node access (regression tracking)
         set_module_db(db)
         # Initialize notification service
@@ -1681,7 +1779,7 @@ class LangGraphWorkflowRunner:
     async def _get_graph(self):
         """Lazily create and cache the compiled graph with appropriate checkpointer."""
         if self._graph is None:
-            graph = create_box_up_role_graph(self.db_path)
+            graph, breakpoints = create_box_up_role_graph(self.db_path)
 
             # Determine which checkpointer to use
             checkpointer = None
@@ -1723,11 +1821,17 @@ class LangGraphWorkflowRunner:
                         "Compiling without checkpointer."
                     )
 
-            # Compile with or without checkpointer
+            # Build compile kwargs
+            compile_kwargs = {}
             if checkpointer is not None:
-                self._graph = graph.compile(checkpointer=checkpointer)
-            else:
-                self._graph = graph.compile()
+                compile_kwargs["checkpointer"] = checkpointer
+            if breakpoints:
+                compile_kwargs["interrupt_before"] = breakpoints
+            if self._store is not None:
+                compile_kwargs["store"] = self._store
+
+            # Compile with or without checkpointer/breakpoints/store
+            self._graph = graph.compile(**compile_kwargs)
 
         return self._graph
 

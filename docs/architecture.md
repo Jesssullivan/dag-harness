@@ -1,58 +1,95 @@
 # Architecture
 
-This document describes the architecture of the DAG Harness.
+This document describes the internal architecture of dag-harness, a LangGraph-based
+DAG orchestration system for Ansible role deployments.
 
-## Overview
-
-The harness is a DAG-based workflow orchestration system built on:
-
-- **LangGraph** - State machine execution with checkpointing
-- **SQLite** - Persistent state and history
-- **FastMCP** - MCP client integration via MCP protocol
-- **Typer/Rich** - CLI interface
+## System Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      MCP client                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │   Skills    │  │    Hooks    │  │     MCP Server      │ │
-│  │ /box-up-role│  │ PreToolUse  │  │    (dag-harness)    │ │
-│  │ /hotl       │  │ PostToolUse │  │                     │ │
-│  └─────────────┘  └─────────────┘  └──────────┬──────────┘ │
-└───────────────────────────────────────────────┼─────────────┘
-                                                │
-┌───────────────────────────────────────────────┼─────────────┐
-│                     Harness Core              │             │
-│  ┌────────────────────────────────────────────▼───────────┐│
-│  │                    CLI (Typer)                         ││
-│  │  box-up-role │ status │ sync │ hotl │ bootstrap        ││
-│  └────────────────────────────────────────────────────────┘│
-│                            │                                │
-│  ┌─────────────────────────┼─────────────────────────────┐ │
-│  │              DAG Engine (LangGraph)                    │ │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐            │ │
-│  │  │ validate │→│ analyze  │→│ worktree │→ ...        │ │
-│  │  └──────────┘  └──────────┘  └──────────┘            │ │
-│  │              SqliteSaver (checkpointing)              │ │
-│  └───────────────────────────────────────────────────────┘ │
-│                            │                                │
-│  ┌─────────────────────────┼─────────────────────────────┐ │
-│  │                   StateDB (SQLite)                     │ │
-│  │  roles │ worktrees │ test_runs │ executions │ metrics │ │
-│  └───────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                      Claude Code                            |
+|  +-----------+  +-----------+  +--------------------------+ |
+|  |  Skills   |  |   Hooks   |  |      MCP Server          | |
+|  |/box-up-   |  |PreToolUse |  |    (dag-harness)         | |
+|  |  role     |  |PostToolUse|  |                          | |
+|  +-----------+  +-----------+  +------------+-------------+ |
++----------------------------------------------|--------------+
+                                               |
++----------------------------------------------|--------------+
+|                  Harness Core                |              |
+|  +-------------------------------------------v-----------+  |
+|  |                   CLI (Typer/Rich)                     |  |
+|  |  box-up-role | status | sync | hotl | bootstrap       |  |
+|  +----------------------------------------------------+  |  |
+|                           |                                 |
+|  +------------------------v-----------------------------+   |
+|  |              DAG Engine (LangGraph)                  |   |
+|  |  +----------+  +----------+  +----------+           |   |
+|  |  | validate |->| analyze  |->| worktree |-> ...     |   |
+|  |  +----------+  +----------+  +----------+           |   |
+|  |              SqliteSaver (checkpointing)             |   |
+|  +------------------------------------------------------+   |
+|                           |                                 |
+|  +------------------------v-----------------------------+   |
+|  |                  StateDB (SQLite)                    |   |
+|  |  roles | worktrees | test_runs | executions | store  |   |
+|  +------------------------------------------------------+   |
++-------------------------------------------------------------+
 ```
 
-## Core Components
+## LangGraph Workflow Engine
 
-### DAG Engine (LangGraph)
+The core execution engine is built on [LangGraph](https://langchain-ai.github.io/langgraph/),
+providing reliable state machine execution with built-in checkpointing.
 
-The workflow execution engine uses LangGraph for:
+### Key Design Decisions
 
-- **State management** - TypedDict-based state with Annotated reducers
-- **Conditional routing** - Smart branching based on test results
-- **Checkpointing** - SqliteSaver for resumable workflows
-- **Async execution** - All nodes are async functions
+- **LangGraph 1.0.x** -- Uses stable release with RetryPolicy support
+- **Async execution** -- All workflow nodes are async functions
+- **TypedDict state** -- Schema-driven state with Annotated reducers
+- **SqliteSaver** -- Persistent checkpoints for resume capability
+- **Conditional routing** -- Smart branching based on test results and failures
+
+### Graph Compilation
+
+The workflow graph is defined using `StateGraph` and compiled with a checkpointer:
+
+```python
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+graph = StateGraph(BoxUpRoleState)
+graph.add_node("validate_role", validate_role_node)
+graph.add_node("analyze_deps", analyze_deps_node)
+# ... more nodes
+
+graph.add_edge("validate_role", "analyze_deps")
+graph.add_conditional_edges("run_molecule", route_after_tests)
+
+compiled = graph.compile(checkpointer=AsyncSqliteSaver.from_conn_string("harness.db"))
+```
+
+### RetryPolicy
+
+External API and subprocess nodes use LangGraph's `RetryPolicy` for resilience:
+
+```python
+from langgraph.types import RetryPolicy
+
+graph.add_node(
+    "create_mr",
+    create_mr_node,
+    retry_policy=RetryPolicy(max_attempts=3)
+)
+```
+
+Default behavior retries on 5xx HTTP errors and skips 4xx client errors.
+
+## State Management
+
+### BoxUpRoleState
+
+The primary state schema for the `box-up-role` workflow:
 
 ```python
 class BoxUpRoleState(TypedDict, total=False):
@@ -60,216 +97,285 @@ class BoxUpRoleState(TypedDict, total=False):
     execution_id: Optional[int]
     worktree_path: str
     molecule_passed: bool
+    pytest_passed: bool
     mr_url: Optional[str]
+    issue_url: Optional[str]
     errors: Annotated[list[str], operator.add]
-    # ...
+    state_snapshots: Annotated[list[dict], keep_last_n(10)]
 ```
 
-Nodes are async functions that transform state:
+### Annotated Reducers
+
+LangGraph uses `Annotated` types to define how state fields are merged across
+node executions:
+
+| Reducer | Behavior | Use Case |
+|---------|----------|----------|
+| `operator.add` | Append new items to list | `errors` -- accumulate all errors |
+| `keep_last_n(n)` | Keep only last N items | `state_snapshots` -- rolling history |
+| Default | Last write wins | Scalar fields like `role_name` |
+
+The `keep_last_n` reducer prevents unbounded state growth for list fields that
+record history.
+
+### Node Functions
+
+Each node is an async function that receives state and returns a partial update:
 
 ```python
 async def validate_role_node(state: BoxUpRoleState) -> BoxUpRoleState:
-    # Validate role exists, extract metadata
+    role_path = Path(state["repo_root"]) / "ansible" / "roles" / state["role_name"]
+    if not role_path.exists():
+        return {"errors": [f"Role not found: {state['role_name']}"]}
     return {"role_path": str(role_path), "has_molecule_tests": True}
 ```
 
-### State Database (SQLite)
+Nodes return only the fields they modify. The LangGraph engine merges updates
+using the configured reducers.
 
-Persistent storage for:
+## Dual Persistence
 
-- **Roles** - Ansible role metadata
-- **Worktrees** - Git worktree tracking
-- **Test runs** - Test history and regression detection
-- **Workflow executions** - Execution history
-- **Golden metrics** - Performance and quality metrics
+dag-harness uses two complementary persistence layers:
 
-Key features:
+### LangGraph Checkpointer
 
-- Regression detection for test failures
-- Dependency graph tracking
-- Checkpoint storage for resumption
+- **Purpose**: Workflow state for pause/resume
+- **Backend**: SQLite (default) or PostgreSQL (production)
+- **Data**: Full graph state at each checkpoint
+- **Access**: LangGraph internal APIs
 
-### MCP Server (FastMCP)
+### StateDB (Application Database)
 
-Provides tools for MCP client integration:
+- **Purpose**: Application state, metadata, and observability
+- **Backend**: SQLite with WAL mode
+- **Data**: Roles, worktrees, test runs, issues, MRs, metrics
+- **Access**: Python API via `StateDB` class
+
+### CheckpointerWithStateDB
+
+The `CheckpointerWithStateDB` class bridges both systems:
 
 ```python
-@mcp.tool()
-def get_role_status(role_name: str) -> dict:
-    """Get the status of a role."""
-    ...
-
-@mcp.tool()
-def run_molecule_tests(role_name: str) -> dict:
-    """Execute molecule tests for a role."""
-    ...
+async with CheckpointerWithStateDB(db, sqlite_path="harness.db") as checkpointer:
+    compiled = graph.compile(checkpointer=checkpointer)
+    await compiled.ainvoke(initial_state, config)
 ```
 
-20+ tools for role management, testing, GitLab integration, etc.
+On every `put()` call, it:
 
-### Bootstrap System
+1. Delegates to the underlying LangGraph checkpointer (source of truth)
+2. Serializes checkpoint data to `workflow_executions.checkpoint_data` in StateDB
+3. Gracefully degrades if StateDB sync fails
 
-Self-installing setup that:
+### CheckpointerFactory
 
-1. Detects environment
-2. Discovers credentials
-3. Validates paths
-4. Initializes database
-5. Installs MCP client integration
-6. Runs self-tests
+For production deployments, the `CheckpointerFactory` manages backend selection:
 
-### HOTL Supervisor
+```python
+from harness.dag.checkpointer import CheckpointerFactory
 
-Human Out of The Loop autonomous operation:
+# Async factory (preferred) -- auto-detects PostgreSQL or falls back to SQLite
+checkpointer = await CheckpointerFactory.create_async()
 
-- Worker pool for parallel execution
-- Checkpoint/resume capability
-- Discord/email notifications
-- Configurable iteration limits
+# Includes connection pooling, health checks, and migration utilities
+```
 
-## Workflow: box-up-role
+## Cross-Thread Memory (HarnessStore)
 
-The primary workflow for packaging an Ansible role:
+The `HarnessStore` implements LangGraph's `BaseStore` interface, enabling
+cross-thread memory persistence backed by StateDB.
+
+### Namespace Structure
+
+| Namespace | Example | Purpose |
+|-----------|---------|---------|
+| `("roles", "<name>")` | `("roles", "common")` | Role-specific memory |
+| `("waves", "<n>")` | `("waves", "0")` | Wave-level coordination |
+| `("users", "<id>")` | `("users", "jsullivan2")` | User preferences |
+| `("workflows", "<type>")` | `("workflows", "box-up-role")` | Workflow execution memory |
+
+### Usage
+
+```python
+from harness.dag.store import HarnessStore
+from harness.db.state import StateDB
+
+db = StateDB("harness.db")
+store = HarnessStore(db)
+
+# Store data
+store.put(("roles", "common"), "status", {"last_run": "2026-02-03", "passed": True})
+
+# Retrieve data
+item = store.get(("roles", "common"), "status")
+print(item.value)  # {"last_run": "2026-02-03", "passed": True}
+
+# Search within namespace
+results = store.search(("roles",), filter={"passed": True})
+```
+
+The store is backed by the `store_items` table in SQLite with JSON-encoded
+namespace tuples and values.
+
+## GitLab Integration
+
+### Idempotent Operations
+
+All GitLab operations (issue creation, MR creation, merge train) are idempotent.
+The system checks for existing resources before creating new ones, using the
+role name and branch as deduplication keys.
+
+### Retry Strategy
+
+GitLab API calls use exponential backoff with jitter:
+
+- HTTP 429 (rate limited): Wait and retry
+- HTTP 5xx (server error): Retry up to 3 times
+- HTTP 4xx (client error): Fail immediately
+
+### Merge Trains
+
+Merge requests are queued into GitLab merge trains for ordered integration.
+The `merge_train_entries` table tracks queue position, pipeline status, and
+completion state.
+
+## Wave-Based Parallel Execution
+
+The `ParallelWaveExecutor` processes roles in wave order:
 
 ```
-validate_role
-    │
-    ▼
-analyze_deps ──────────────────────────┐
-    │                                  │
-    ▼                                  │
-check_reverse_deps ───► [blocked] ────►│
-    │                                  │
-    ▼                                  │
-create_worktree                        │
-    │                                  │
-    ▼                                  │
-run_molecule ──────► [fail] ──────────►│
-    │                                  │
-    ▼                                  │
-run_pytest ────────► [fail] ──────────►│
-    │                                  │
-    ▼                                  │
-validate_deploy ───► [fail] ──────────►│
-    │                                  ▼
-    ▼                           notify_failure
-create_commit                          │
-    │                                  │
-    ▼                                  │
-push_branch                            │
-    │                                  │
-    ▼                                  │
-create_issue                           │
-    │                                  │
-    ▼                                  │
-create_mr                              │
-    │                                  │
-    ▼                                  │
-add_to_merge_train                     │
-    │                                  │
-    ▼                                  │
-report_summary ◄───────────────────────┘
-    │
-    ▼
-   END
+Wave 0: [common]                    -- Sequential (foundation)
+Wave 1: [windows_prerequisites, ems_registry_urls, iis-config]  -- Parallel
+Wave 2: [ems_platform_services, ems_web_app, database_clone]    -- Parallel
+Wave 3: [ems_master_calendar, ems_campus_webservice, ...]       -- Parallel
+Wave 4: [grafana_alloy_windows, email_infrastructure, ...]      -- Parallel
 ```
+
+Within each wave, roles execute in parallel (configurable via `parallel: false`
+in wave definitions). The executor waits for all roles in a wave to complete
+before advancing to the next wave.
+
+### Parallel Test Execution
+
+Within a single role workflow, molecule and pytest tests run in parallel using
+LangGraph's `Send` API:
+
+```python
+from langgraph.types import Send
+
+def route_to_parallel_tests(state):
+    sends = []
+    if state.get("has_molecule_tests"):
+        sends.append(Send("run_molecule", state))
+    if state.get("has_pytest_tests"):
+        sends.append(Send("run_pytest", state))
+    return sends
+```
+
+The `merge_test_results_node` aggregates results from parallel test branches.
+Target improvement: 30%+ time reduction for the test phase when both test
+types are available.
+
+## Interrupt/Resume Workflow
+
+### Human-in-the-Loop (HITL)
+
+The workflow supports pausing at any node for human review:
+
+```python
+from langgraph.types import interrupt
+
+async def human_approval_node(state: BoxUpRoleState) -> BoxUpRoleState:
+    response = interrupt({"question": "Approve merge request creation?"})
+    return {"human_approved": response.get("approved", False)}
+```
+
+### Static Breakpoints
+
+Default breakpoints pause before critical operations:
+
+```python
+DEFAULT_BREAKPOINTS = [
+    "human_approval",      # Always pause
+    "create_mr",           # Before MR creation
+    "add_to_merge_train",  # Before merge train
+]
+```
+
+Enable via environment variable:
+
+```bash
+export HARNESS_BREAKPOINTS=true
+```
+
+Or per-execution:
+
+```bash
+harness box-up-role common --breakpoints run_molecule,create_mr
+```
+
+### Resume
+
+Paused workflows store their full state in the checkpointer. Resume with:
+
+```bash
+harness resume <execution-id>
+```
+
+The `Command(resume=...)` pattern provides human input back to the paused node.
 
 ## Database Schema
 
-Key tables:
+The SQLite database uses an adjacency list pattern with recursive CTEs for
+dependency traversal. Key tables:
+
+| Table | Purpose |
+|-------|---------|
+| `roles` | Ansible role metadata and wave placement |
+| `role_dependencies` | Dependency graph (adjacency list) |
+| `worktrees` | Git worktree tracking |
+| `workflow_executions` | Workflow execution history and checkpoints |
+| `node_executions` | Per-node execution records |
+| `test_runs` | Test execution history |
+| `test_regressions` | Regression detection and tracking |
+| `issues` | GitLab issue metadata |
+| `merge_requests` | GitLab MR metadata |
+| `merge_train_entries` | Merge train queue state |
+| `store_items` | Cross-thread memory (HarnessStore) |
+| `token_usage` | Cost tracking per session |
+| `audit_log` | Mutation audit trail |
+| `agent_sessions` | HOTL Claude Code session tracking |
+| `execution_contexts` | Context control for session management |
+
+### Graph Traversal
+
+Dependencies are queried using recursive CTEs:
 
 ```sql
-CREATE TABLE roles (
-    id INTEGER PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL,
-    wave INTEGER DEFAULT 0,
-    has_molecule_tests BOOLEAN,
-    description TEXT
-);
-
-CREATE TABLE worktrees (
-    id INTEGER PRIMARY KEY,
-    role_id INTEGER REFERENCES roles(id),
-    path TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    status TEXT
-);
-
-CREATE TABLE test_runs (
-    id INTEGER PRIMARY KEY,
-    role_id INTEGER REFERENCES roles(id),
-    test_name TEXT NOT NULL,
-    test_type TEXT NOT NULL,
-    passed BOOLEAN NOT NULL,
-    error_message TEXT,
-    run_at TEXT NOT NULL
-);
-
-CREATE TABLE workflow_executions (
-    id INTEGER PRIMARY KEY,
-    role_id INTEGER REFERENCES roles(id),
-    status TEXT NOT NULL,
-    current_node TEXT,
-    started_at TEXT,
-    completed_at TEXT,
-    checkpoint BLOB
-);
+-- Get all transitive dependencies of a role
+WITH RECURSIVE deps(role_id, depth) AS (
+    SELECT depends_on_id, 1 FROM role_dependencies WHERE role_id = ?
+    UNION ALL
+    SELECT rd.depends_on_id, d.depth + 1
+    FROM role_dependencies rd
+    JOIN deps d ON rd.role_id = d.role_id
+    WHERE d.depth < 10
+)
+SELECT DISTINCT r.name, d.depth
+FROM deps d JOIN roles r ON d.role_id = r.id
+ORDER BY d.depth;
 ```
 
-## Extension Points
+### Views
 
-### Custom Nodes
+Pre-built views for common queries:
 
-Add custom nodes to the workflow:
-
-```python
-from harness.dag.langgraph_engine import BoxUpRoleState
-
-async def custom_node(state: BoxUpRoleState) -> BoxUpRoleState:
-    # Custom logic
-    return {"custom_field": "value"}
-```
-
-### MCP Tools
-
-Add custom MCP tools:
-
-```python
-@mcp.tool()
-def my_custom_tool(arg: str) -> dict:
-    """Description of the tool."""
-    return {"result": "value"}
-```
-
-### Hooks
-
-Add custom hooks in `.claude/hooks/`:
-
-- `PreToolUse` - Validate before tool execution
-- `PostToolUse` - React after tool execution
-
-## Configuration
-
-Configuration via `harness.yml` or environment variables:
-
-```yaml
-gitlab:
-  project_path: "group/project"
-  assignee_ids: [123]
-
-worktree:
-  base_path: "../worktrees"
-  branch_prefix: "sid/"
-
-testing:
-  molecule_timeout: 600
-  pytest_timeout: 300
-
-waves:
-  0:
-    name: "Foundation"
-    roles: ["common"]
-  1:
-    name: "Infrastructure"
-    roles: ["nginx", "docker"]
-```
+| View | Purpose |
+|------|---------|
+| `v_role_status` | Role status with worktree, issue, MR, and test counts |
+| `v_dependency_graph` | Dependency edges for visualization |
+| `v_active_regressions` | Active and flaky test regressions |
+| `v_context_capabilities` | Session capabilities with expiration status |
+| `v_agent_sessions` | HOTL sessions with file change counts |
+| `v_daily_costs` | Token usage cost by day and model |
+| `v_session_costs` | Token usage cost by session |

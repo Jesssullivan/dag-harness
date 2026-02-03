@@ -1,95 +1,65 @@
-# DAG Harness Documentation
+# DAG Harness
 
-A self-installing DAG orchestration package built on LangGraph with complete MCP client integration.
+A self-installing DAG orchestration system built on LangGraph for automated
+Ansible role deployments. Provides MCP server integration for Claude Code,
+human-on-the-loop autonomous operation, and wave-based parallel execution.
 
-## Overview
+## Features
 
-The DAG Harness provides automated workflow orchestration for Ansible role deployments, with features including:
-
-- **LangGraph-based DAG execution** - Reliable, checkpointed workflow execution
-- **MCP client integration** - MCP server, hooks, and skills for AI-assisted development
-- **Self-bootstrapping** - Single-command setup from within MCP client
-- **Human Out of The Loop (HOTL)** - Autonomous operation mode with notifications
-
-## Quick Start
-
-```bash
-# Install the harness
-cd harness && uv sync && cd ..
-
-# Bootstrap (interactive setup)
-harness bootstrap
-
-# Verify installation
-harness bootstrap --check-only
-```
+- **LangGraph DAG execution** -- Reliable, checkpointed workflow execution
+  with conditional routing and retry policies
+- **Dual persistence** -- LangGraph checkpointer for graph state, SQLite
+  StateDB for application data and observability
+- **Cross-thread memory** -- HarnessStore (BaseStore) for sharing state
+  between workflow executions
+- **Claude Code integration** -- MCP server with 20+ tools, hook-based
+  audit logging, and slash command skills
+- **Wave-based parallelism** -- Roles execute in dependency-ordered waves
+  with parallel execution within each wave
+- **Human-on-the-loop (HOTL)** -- Autonomous operation with configurable
+  checkpoints, notifications, and approval workflows
+- **GitLab integration** -- Idempotent issue/MR creation, merge train
+  management, and iteration tracking
 
 ## Documentation
 
-- [Getting Started](getting-started.md) - Installation and first steps
-- [Architecture](architecture.md) - System design and components
-- [CLI Reference](api/cli.md) - Command-line interface documentation
-- [MCP Tools](api/mcp-tools.md) - MCP server tool reference
+| Guide | Description |
+|-------|-------------|
+| [Quick Start](quickstart.md) | Installation, setup, and first workflow in 5 minutes |
+| [Configuration](configuration.md) | Complete harness.yml reference, environment variables, Pydantic models |
+| [Architecture](architecture.md) | LangGraph engine, state management, dual persistence, wave execution |
+| [Claude Code Integration](claude-code-integration.md) | MCP server setup, hooks, skills, HOTL with Claude Code |
+| [API Reference](api-reference.md) | CLI commands, Python API, configuration models |
 
-## Key Features
-
-### Self-Bootstrapping
-
-The harness can install and configure itself from within MCP client:
-
-```bash
-harness bootstrap              # Full interactive setup
-harness bootstrap --check-only # Verify current state
-```
-
-The bootstrap wizard:
-
-1. Detects your environment (Python, git, paths)
-2. Discovers and validates credentials
-3. Initializes the database
-4. Installs MCP client integration
-5. Runs self-tests to verify setup
-
-### Workflow Execution
-
-Execute box-up-role workflows for Ansible roles:
+## Quick Example
 
 ```bash
-harness box-up-role <role-name>
-harness status [role-name]
-harness resume <execution-id>
+# Install
+uv pip install dag-harness
+
+# Initialize in your Ansible project
+cd /path/to/ansible-project
+harness init
+harness bootstrap
+
+# Sync roles from filesystem
+harness sync
+
+# Run the box-up-role workflow
+harness box-up-role common
+
+# Check status
+harness status
 ```
 
-### HOTL Mode
+## Project Links
 
-Run autonomous operations with human oversight:
-
-```bash
-harness hotl start --max-iterations 100
-harness hotl status
-harness hotl stop
-```
-
-## Project Structure
-
-```
-disposable-dag-langchain/
-├── harness/                    # Core Python package
-│   ├── harness/
-│   │   ├── cli.py              # CLI entry point
-│   │   ├── bootstrap/          # Self-bootstrapping system
-│   │   ├── dag/                # LangGraph engine
-│   │   ├── db/                 # SQLite state management
-│   │   ├── hotl/               # Autonomous operation
-│   │   └── mcp/                # MCP server
-│   └── tests/
-├── .claude/                    # MCP client integration
-│   ├── settings.json           # MCP server + hooks config
-│   ├── hooks/                  # PreToolUse/PostToolUse hooks
-│   └── skills/                 # Skill definitions
-└── docs/                       # Documentation
-```
+- [Source Code (GitHub)](https://github.com/Jesssullivan/dag-harness)
+- [Source Code (GitLab)](https://gitlab.com/tinyland/projects/dag-harness)
+- [Changelog](https://github.com/Jesssullivan/dag-harness/blob/main/CHANGELOG.md)
+- [Issue Tracker](https://github.com/Jesssullivan/dag-harness/issues)
 
 ## License
 
-MIT License - see [LICENSE](../LICENSE) for details.
+MIT License -- see [LICENSE](https://github.com/Jesssullivan/dag-harness/blob/main/LICENSE)
+for details.

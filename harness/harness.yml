@@ -1,66 +1,60 @@
-# Harness Configuration for EMS Project
-# Points to the EMS repository for role management
-
-# Database location (absolute path for consistency)
-db_path: /Users/jsullivan2/git/disposable-dag-langchain/harness/harness.db
-
-# Path to the repository containing Ansible roles
-repo_root: /Users/jsullivan2/git/ems
-
-# GitLab configuration
+db_path: harness.db
 gitlab:
-  project_path: bates-ils/projects/ems/ems-mono
-  group_path: bates-ils
   default_assignee: jsullivan2
-  default_labels:
-    - role
-    - ansible
-    - molecule
   default_iteration: EMS Upgrade
-
-# Worktree configuration
-worktree:
-  base_path: /Users/jsullivan2/git/ems-worktrees
-  branch_prefix: sid/
-
-# Testing configuration
+  default_labels:
+  - role
+  - ansible
+  - molecule
+  group_path: bates-ils
+  project_path: bates-ils/projects/ems/ems-mono
+notifications:
+  discord_webhook_url: null
+  email_recipient: null
+  enabled: false
+observability:
+  anonymize_sensitive: true
+  langsmith_enabled: false
+  langsmith_project: dag-harness
+repo_root: .
 testing:
+  deploy_target: vmnode852
   molecule_required: true
-  pytest_required: true
-  deploy_target: vmnode876
   molecule_timeout: 600
+  pytest_required: true
   pytest_timeout: 300
-
-# Wave definitions
 waves:
   0:
     name: Foundation
     roles:
-      - common
+    - common
   1:
     name: Infrastructure Foundation
     roles:
-      - windows_prerequisites
-      - ems_registry_urls
-      - iis-config
+    - windows_prerequisites
+    - ems_registry_urls
+    - iis-config
   2:
     name: Core Platform
     roles:
-      - ems_platform_services
-      - ems_web_app
-      - database_clone
-      - ems_download_artifacts
+    - ems_platform_services
+    - ems_web_app
+    - database_clone
+    - ems_download_artifacts
   3:
     name: Web Applications
     roles:
-      - ems_master_calendar
-      - ems_master_calendar_api
-      - ems_campus_webservice
-      - ems_desktop_deploy
+    - ems_master_calendar
+    - ems_master_calendar_api
+    - ems_campus_webservice
+    - ems_desktop_deploy
   4:
     name: Supporting Services
     roles:
-      - grafana_alloy_windows
-      - email_infrastructure
-      - hrtk_protected_users
-      - ems_environment_util
+    - grafana_alloy_windows
+    - email_infrastructure
+    - hrtk_protected_users
+    - ems_environment_util
+worktree:
+  base_path: ..
+  branch_prefix: sid/

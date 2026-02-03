@@ -29,6 +29,8 @@ from harness.hotl.context import (
     ContextStats,
     FileMemory,
 )
+from harness.hotl.orchestrator import HOTLOrchestrator
+from harness.hotl.queue import QueueItem, QueueItemStatus, RoleQueue
 from harness.hotl.state import HOTLPhase, HOTLState
 from harness.hotl.supervisor import HOTLSupervisor
 from harness.hotl.worker_pool import Task, WorkerPool
@@ -38,6 +40,11 @@ __all__ = [
     "HOTLState",
     "HOTLPhase",
     "HOTLSupervisor",
+    # Queue and orchestration
+    "RoleQueue",
+    "QueueItem",
+    "QueueItemStatus",
+    "HOTLOrchestrator",
     # Worker pool
     "WorkerPool",
     "Task",

@@ -1,6 +1,6 @@
 [project]
 name = "dag-harness"
-version = "0.2.0"
+version = "0.3.0"
 description = "Disposable DAG orchestration harness with LangGraph and MCP client integration"
 readme = "../README.md"
 requires-python = ">=3.11"
@@ -110,6 +110,13 @@ path = "harness/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["harness"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# Include SQL schemas for database initialization
+"harness/db/schema.sql" = "harness/db/schema.sql"
+# Include templates for harness init
+"harness/templates/harness.yml.j2" = "harness/templates/harness.yml.j2"
+"harness/templates/gitignore_additions.txt" = "harness/templates/gitignore_additions.txt"
+
 [tool.hatch.build.targets.sdist]
 include = [
     "/harness",
@@ -142,6 +149,27 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Bootstrap module uses imports for availability checking
 "harness/bootstrap/__init__.py" = ["F401"]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "v$version"
+version_scheme = "semver"
+version_provider = "pep621"
+update_changelog_on_bump = true
+changelog_file = "../CHANGELOG.md"
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+version_variable = ["harness/__init__.py:__version__"]
+branch = "main"
+build_command = "uv build"
+commit_message = "chore(release): bump version to {version}"
+
+[tool.semantic_release.changelog]
+changelog_file = "../CHANGELOG.md"
+
+[tool.semantic_release.remote]
+type = "github"
 
 [tool.coverage.run]
 source = ["harness"]

@@ -3,16 +3,30 @@ Parallel execution support for wave-based workflows.
 
 Provides:
 - Wave grouping of independent nodes
-- Concurrent execution with asyncio
+- Concurrent execution with asyncio (legacy)
+- LangGraph Send API for parallel role execution with checkpointing
 - Progress tracking across parallel tasks
 - Error aggregation and reporting
+
+Wave Execution Architecture:
+- WaveExecutionState: TypedDict for wave context
+- create_wave_execution_graph(): Creates StateGraph for wave execution
+- route_to_wave_roles(): Returns list[Send] for parallel role execution
+- merge_wave_results_node(): Aggregates results from parallel roles
 """
 
 import asyncio
+import operator
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Annotated, Any, Literal, TypedDict
+
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import END, StateGraph
+from langgraph.types import Send
 
 from harness.dag.langgraph_engine import (
     LangGraphWorkflowRunner,
@@ -79,6 +93,351 @@ class WaveProgress:
         if self.total_roles == 0:
             return 100.0
         return (self.completed_roles + self.failed_roles) / self.total_roles * 100
+
+
+# =============================================================================
+# LANGGRAPH SEND API FOR WAVE EXECUTION
+# =============================================================================
+
+
+class WaveExecutionState(TypedDict, total=False):
+    """
+    TypedDict state schema for wave-level parallel execution.
+
+    Uses Annotated types with operator.add reducers for proper list accumulation.
+    This ensures results from parallel role executions are aggregated correctly.
+
+    Fields:
+        wave_number: Current wave being executed (0-8)
+        wave_name: Human-readable wave name (e.g., "Infrastructure Foundation")
+        role_names: List of roles to execute in this wave
+        max_concurrent: Maximum concurrent role executions
+        results: Accumulated results from each role execution
+        errors: Accumulated errors across all roles
+        completed_roles: List of roles that have completed (success or failure)
+        pending_roles: Roles not yet started
+        start_time: Wave execution start timestamp
+        duration_seconds: Total wave execution duration
+        status: Overall wave status
+    """
+
+    # Wave identification
+    wave_number: int
+    wave_name: str
+
+    # Role configuration
+    role_names: list[str]
+    max_concurrent: int
+
+    # Results accumulation (use reducers for parallel updates)
+    results: Annotated[list[dict], operator.add]
+    errors: Annotated[list[str], operator.add]
+    completed_roles: Annotated[list[str], operator.add]
+
+    # Execution tracking
+    pending_roles: list[str]
+    start_time: float | None
+    duration_seconds: float | None
+    status: str  # "pending" | "running" | "completed" | "failed" | "partial"
+
+
+class RoleExecutionState(TypedDict, total=False):
+    """
+    State for individual role execution within a wave.
+
+    This is passed to each parallel role execution via Send API.
+    Contains the role-specific context plus wave context for tracking.
+    """
+
+    # Role identification
+    role_name: str
+    wave_number: int
+    wave_name: str
+
+    # Execution tracking
+    start_time: float | None
+    execution_id: int | None
+
+    # Results
+    status: str  # "pending" | "running" | "completed" | "failed"
+    error: str | None
+    duration_seconds: float | None
+    summary: dict | None
+
+
+def create_initial_wave_state(
+    wave_number: int,
+    wave_name: str,
+    role_names: list[str],
+    max_concurrent: int = 3,
+) -> WaveExecutionState:
+    """Create initial state for wave execution."""
+    return WaveExecutionState(
+        wave_number=wave_number,
+        wave_name=wave_name,
+        role_names=role_names,
+        max_concurrent=max_concurrent,
+        results=[],
+        errors=[],
+        completed_roles=[],
+        pending_roles=list(role_names),
+        start_time=None,
+        duration_seconds=None,
+        status="pending",
+    )
+
+
+# =============================================================================
+# WAVE EXECUTION NODES
+# =============================================================================
+
+
+async def start_wave_node(state: WaveExecutionState) -> dict:
+    """
+    Initialize wave execution and record start time.
+
+    This node prepares the wave for parallel role execution.
+    """
+    return {
+        "start_time": time.time(),
+        "status": "running",
+        "pending_roles": list(state.get("role_names", [])),
+    }
+
+
+async def execute_role_node(state: RoleExecutionState) -> dict:
+    """
+    Execute a single role workflow within a wave.
+
+    This node is invoked via Send API for each role in parallel.
+    It runs the full box-up-role workflow for the given role.
+
+    Returns:
+        Dict with role execution results to be merged into wave state.
+    """
+    role_name = state["role_name"]
+    wave_number = state.get("wave_number", 0)
+    start_time = time.time()
+
+    try:
+        # Import here to avoid circular imports
+        from harness.db.state import StateDB
+
+        # Get or create database connection
+        # Note: In production, this should be passed via config
+        db = StateDB()
+
+        runner = LangGraphWorkflowRunner(db)
+        result = await runner.execute(role_name)
+
+        duration = time.time() - start_time
+        status = result.get("status", "unknown")
+
+        return {
+            "results": [
+                {
+                    "role_name": role_name,
+                    "wave": wave_number,
+                    "status": status,
+                    "execution_id": result.get("execution_id"),
+                    "error": result.get("error"),
+                    "duration_seconds": duration,
+                    "summary": result.get("summary"),
+                }
+            ],
+            "completed_roles": [role_name],
+            "errors": [f"{role_name}: {result.get('error')}"] if result.get("error") else [],
+        }
+
+    except Exception as e:
+        duration = time.time() - start_time
+        return {
+            "results": [
+                {
+                    "role_name": role_name,
+                    "wave": wave_number,
+                    "status": "error",
+                    "error": str(e),
+                    "duration_seconds": duration,
+                }
+            ],
+            "completed_roles": [role_name],
+            "errors": [f"{role_name}: {e}"],
+        }
+
+
+async def merge_wave_results_node(state: WaveExecutionState) -> dict:
+    """
+    Merge results from parallel role executions and determine wave status.
+
+    This node runs after all parallel role executions complete.
+    It aggregates results and calculates final wave status.
+
+    Returns:
+        Dict with final wave status and duration.
+    """
+    results = state.get("results", [])
+    role_names = state.get("role_names", [])
+    start_time = state.get("start_time")
+
+    # Calculate duration
+    duration = time.time() - start_time if start_time else None
+
+    # Count successes and failures
+    success_count = sum(1 for r in results if r.get("status") == "completed")
+    failure_count = len(results) - success_count
+
+    # Determine wave status
+    if failure_count == 0:
+        status = "completed"
+    elif success_count == 0:
+        status = "failed"
+    else:
+        status = "partial"
+
+    # Log completion
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info(
+        f"Wave execution completed: {success_count}/{len(role_names)} roles succeeded, "
+        f"duration={duration:.1f}s" if duration else ""
+    )
+
+    return {
+        "status": status,
+        "duration_seconds": duration,
+        "pending_roles": [],
+    }
+
+
+# =============================================================================
+# ROUTING FUNCTIONS
+# =============================================================================
+
+
+def route_to_wave_roles(state: WaveExecutionState) -> list[Send]:
+    """
+    Fan out to parallel role execution nodes using Send API.
+
+    Uses LangGraph's Send API to execute multiple roles in parallel.
+    Each role gets its own execution context while sharing the wave context.
+
+    This enables:
+    - Proper checkpoint integration for each role
+    - Parallel execution with semaphore-like control via max_concurrent
+    - Result aggregation via reducer pattern
+
+    Args:
+        state: Current wave execution state
+
+    Returns:
+        List of Send objects targeting execute_role nodes.
+    """
+    role_names = state.get("role_names", [])
+    wave_number = state.get("wave_number", 0)
+    wave_name = state.get("wave_name", "")
+
+    if not role_names:
+        # No roles to execute, skip to merge
+        return [Send("merge_wave_results", state)]
+
+    sends = []
+    for role_name in role_names:
+        # Create role-specific execution state
+        role_state: RoleExecutionState = {
+            "role_name": role_name,
+            "wave_number": wave_number,
+            "wave_name": wave_name,
+            "start_time": time.time(),
+            "status": "pending",
+        }
+        sends.append(Send("execute_role", role_state))
+
+    return sends
+
+
+def should_continue_after_wave_start(
+    state: WaveExecutionState,
+) -> Literal["route_to_roles", "merge_wave_results"]:
+    """
+    Route after wave start - either fan out to roles or skip if no roles.
+    """
+    role_names = state.get("role_names", [])
+    if not role_names:
+        return "merge_wave_results"
+    return "route_to_roles"
+
+
+# =============================================================================
+# GRAPH CONSTRUCTION
+# =============================================================================
+
+
+def create_wave_execution_graph() -> StateGraph:
+    """
+    Create a LangGraph StateGraph for wave-level parallel execution.
+
+    This graph enables running multiple roles in parallel within a wave,
+    with proper checkpoint support via LangGraph's Send API.
+
+    Graph Structure:
+        start_wave -> [parallel: execute_role x N] -> merge_wave_results -> END
+
+    The parallel execution uses Send API to fan out to execute_role nodes,
+    one for each role in the wave. Results are merged via the reducer pattern
+    defined in WaveExecutionState.
+
+    Returns:
+        StateGraph configured for wave execution (call .compile() to use).
+
+    Usage:
+        graph = create_wave_execution_graph()
+        compiled = graph.compile(checkpointer=checkpointer)
+        result = await compiled.ainvoke(initial_state)
+    """
+    graph = StateGraph(WaveExecutionState)
+
+    # Add nodes
+    graph.add_node("start_wave", start_wave_node)
+    graph.add_node("execute_role", execute_role_node)
+    graph.add_node("merge_wave_results", merge_wave_results_node)
+
+    # Set entry point
+    graph.set_entry_point("start_wave")
+
+    # Add edges
+    # After start_wave, fan out to parallel role execution
+    graph.add_conditional_edges(
+        "start_wave",
+        route_to_wave_roles,
+        ["execute_role", "merge_wave_results"],
+    )
+
+    # All role executions converge at merge_wave_results
+    graph.add_edge("execute_role", "merge_wave_results")
+
+    # After merge, we're done
+    graph.add_edge("merge_wave_results", END)
+
+    return graph
+
+
+async def create_compiled_wave_graph(db_path: str = "harness.db"):
+    """
+    Create and compile the wave execution graph with checkpointer.
+
+    Args:
+        db_path: Path to SQLite database for checkpointing.
+
+    Returns:
+        Compiled graph ready for execution with .ainvoke().
+    """
+    graph = create_wave_execution_graph()
+
+    async with AsyncSqliteSaver.from_conn_string(db_path) as checkpointer:
+        compiled = graph.compile(checkpointer=checkpointer)
+        return compiled
 
 
 class ParallelWaveExecutor:

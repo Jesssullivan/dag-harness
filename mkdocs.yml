@@ -5,7 +5,7 @@
 # Deploy: via GitLab CI to Pages
 
 site_name: DAG Harness
-site_description: Self-installing DAG orchestration for Ansible role deployments
+site_description: LangGraph DAG orchestration for Ansible roles
 site_author: Jess Sullivan
 site_url: https://disposable-ansible-dag.ephemera.xoxd.ai
 
@@ -36,12 +36,11 @@ theme:
 # Navigation structure
 nav:
   - Home: index.md
-  - Getting Started: getting-started.md
+  - Quick Start: quickstart.md
+  - Configuration: configuration.md
   - Architecture: architecture.md
-  - API Reference:
-    - CLI Commands: api/cli.md
-    - MCP Tools: api/mcp-tools.md
-    - Python API: api/python.md
+  - Claude Code Integration: claude-code-integration.md
+  - API Reference: api-reference.md
   - LLM Docs:
     - llms.txt: llms.txt
     - llms.md: llms.md

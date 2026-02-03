@@ -880,9 +880,12 @@ Closes #{issue_iid}
             )
 
             if result.returncode != 0:
+                # Normalize whitespace for checking (GitLab errors can span multiple lines)
+                stderr_normalized = " ".join(result.stderr.split())
+
                 # Check if error is "MR already exists" - handle gracefully
-                if "Another open merge request already exists" in result.stderr:
-                    # Try to find the existing MR
+                if "Another open merge request already exists" in stderr_normalized or "409" in stderr_normalized:
+                    # Try to find the existing MR ID in the error message
                     mr_match = re.search(r'!(\d+)', result.stderr)
                     if mr_match:
                         mr_iid = mr_match.group(1)
@@ -892,7 +895,7 @@ Closes #{issue_iid}
                             "mr_reused": True,
                         }
                 return NodeResult.FAILURE, {
-                    "error": f"glab mr create failed: {result.stderr}",
+                    "error": f"glab mr create failed: {stderr_normalized[:500]}",
                     "stdout": result.stdout,
                 }
 

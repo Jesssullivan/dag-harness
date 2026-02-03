@@ -531,6 +531,31 @@ END;
 -- Note: agent_sessions doesn't have updated_at since we track started_at and completed_at separately
 
 -- ============================================================================
+-- LANGGRAPH STORE (Cross-Thread Memory)
+-- ============================================================================
+
+-- Store entries for cross-thread memory (LangGraph Store interface)
+CREATE TABLE IF NOT EXISTS store_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(namespace, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_items_namespace ON store_items(namespace);
+CREATE INDEX IF NOT EXISTS idx_store_items_namespace_key ON store_items(namespace, key);
+
+-- Trigger for updated_at
+CREATE TRIGGER IF NOT EXISTS trg_store_items_updated
+AFTER UPDATE ON store_items
+BEGIN
+    UPDATE store_items SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+END;
+
+-- ============================================================================
 -- TOKEN USAGE / COST TRACKING
 -- ============================================================================
 
