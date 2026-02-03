@@ -211,7 +211,7 @@ class TestGraphWithHITL:
         """Verify graph includes human_approval node."""
         from harness.dag.langgraph_engine import create_box_up_role_graph
 
-        graph = create_box_up_role_graph()
+        graph, _breakpoints = create_box_up_role_graph()
 
         # Get node names from the graph
         # StateGraph stores nodes in a dict-like structure
@@ -223,7 +223,7 @@ class TestGraphWithHITL:
 
         from harness.dag.langgraph_engine import create_box_up_role_graph
 
-        graph = create_box_up_role_graph()
+        graph, _breakpoints = create_box_up_role_graph()
 
         # Graph should compile without errors
         # Even without a real checkpointer for basic compilation
@@ -235,7 +235,7 @@ class TestGraphWithHITL:
         """Verify graph has correct edge routing around HITL."""
         from harness.dag.langgraph_engine import create_box_up_role_graph
 
-        graph = create_box_up_role_graph()
+        graph, _breakpoints = create_box_up_role_graph()
         compiled = graph.compile()
 
         # Compiled graph should be ready for execution

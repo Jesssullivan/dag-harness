@@ -126,7 +126,7 @@ class TestValidateRoleNode:
     async def test_valid_role_with_molecule(self, temp_role_structure):
         """Happy path: valid role with molecule tests."""
         with patch(
-            "harness.dag.langgraph_engine.Path",
+            "harness.dag.langgraph_nodes.Path",
             return_value=temp_role_structure / "ansible" / "roles" / "test_role",
         ):
             # Create the role path correctly
@@ -144,7 +144,7 @@ class TestValidateRoleNode:
                     return role_path
                 return original_path(p)
 
-            with patch("harness.dag.langgraph_engine.Path", side_effect=patched_path):
+            with patch("harness.dag.langgraph_nodes.Path", side_effect=patched_path):
                 state: BoxUpRoleState = {"role_name": "test_role"}
                 result = await validate_role_node(state)
 
@@ -180,7 +180,7 @@ class TestValidateRoleNode:
                 return role_path
             return original_path(p)
 
-        with patch("harness.dag.langgraph_engine.Path", side_effect=patched_path):
+        with patch("harness.dag.langgraph_nodes.Path", side_effect=patched_path):
             state: BoxUpRoleState = {"role_name": "no_molecule_role"}
             result = await validate_role_node(state)
 
@@ -1011,7 +1011,7 @@ class TestHumanApprovalNode:
     async def test_human_approval_approved(self):
         """Happy path: human approves the MR."""
         # Mock interrupt to return approval
-        with patch("harness.dag.langgraph_engine.interrupt") as mock_interrupt:
+        with patch("harness.dag.langgraph_nodes.interrupt") as mock_interrupt:
             mock_interrupt.return_value = {"approved": True, "reason": ""}
 
             state: BoxUpRoleState = {
@@ -1032,7 +1032,7 @@ class TestHumanApprovalNode:
     @pytest.mark.unit
     async def test_human_approval_rejected(self):
         """Error handling: human rejects the MR."""
-        with patch("harness.dag.langgraph_engine.interrupt") as mock_interrupt:
+        with patch("harness.dag.langgraph_nodes.interrupt") as mock_interrupt:
             mock_interrupt.return_value = {"approved": False, "reason": "Needs more tests"}
 
             state: BoxUpRoleState = {
@@ -1053,7 +1053,7 @@ class TestHumanApprovalNode:
     @pytest.mark.unit
     async def test_human_approval_simple_bool_response(self):
         """Edge case: human provides simple boolean response."""
-        with patch("harness.dag.langgraph_engine.interrupt") as mock_interrupt:
+        with patch("harness.dag.langgraph_nodes.interrupt") as mock_interrupt:
             mock_interrupt.return_value = True  # Simple boolean
 
             state: BoxUpRoleState = {
@@ -1358,7 +1358,7 @@ class TestValidateRoleNodeExtended:
                 return role_path
             return original_path(p)
 
-        with patch("harness.dag.langgraph_engine.Path", side_effect=patched_path):
+        with patch("harness.dag.langgraph_nodes.Path", side_effect=patched_path):
             state: BoxUpRoleState = {"role_name": "meta_only_role"}
             result = await validate_role_node(state)
 
@@ -1518,7 +1518,7 @@ class TestRunMoleculeNodeExtended:
 
         with (
             patch("subprocess.run") as mock_run,
-            patch("harness.dag.langgraph_engine._record_test_result") as mock_record,
+            patch("harness.dag.langgraph_nodes._record_test_result") as mock_record,
         ):
             mock_result = MagicMock()
             mock_result.returncode = 1
@@ -1766,7 +1766,7 @@ class TestHumanApprovalNodeExtended:
     @pytest.mark.unit
     async def test_human_approval_rejected_no_reason(self):
         """Edge case: rejection without a reason provided."""
-        with patch("harness.dag.langgraph_engine.interrupt") as mock_interrupt:
+        with patch("harness.dag.langgraph_nodes.interrupt") as mock_interrupt:
             mock_interrupt.return_value = {"approved": False}  # No reason key
 
             state: BoxUpRoleState = {
@@ -1788,7 +1788,7 @@ class TestHumanApprovalNodeExtended:
     @pytest.mark.unit
     async def test_human_approval_false_bool_response(self):
         """Edge case: simple False boolean response."""
-        with patch("harness.dag.langgraph_engine.interrupt") as mock_interrupt:
+        with patch("harness.dag.langgraph_nodes.interrupt") as mock_interrupt:
             mock_interrupt.return_value = False
 
             state: BoxUpRoleState = {
@@ -1813,7 +1813,7 @@ class TestHumanApprovalNodeExtended:
             captured_context.update(data)
             return {"approved": True}
 
-        with patch("harness.dag.langgraph_engine.interrupt", side_effect=mock_interrupt):
+        with patch("harness.dag.langgraph_nodes.interrupt", side_effect=mock_interrupt):
             state: BoxUpRoleState = {
                 "role_name": "my_role",
                 "mr_url": "https://gitlab.example.com/mr/999",

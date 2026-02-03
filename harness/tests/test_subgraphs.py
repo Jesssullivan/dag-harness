@@ -243,7 +243,7 @@ class TestValidationSubgraph:
         """Validation subgraph handles missing role."""
         graph = create_validation_subgraph()
 
-        with patch("harness.dag.langgraph_engine.Path") as mock_path:
+        with patch("harness.dag.langgraph_nodes.Path") as mock_path:
             mock_path.return_value.exists.return_value = False
 
             result = await graph.ainvoke(initial_state)
@@ -268,7 +268,7 @@ class TestValidationSubgraph:
 
         graph = create_validation_subgraph()
 
-        with patch("harness.dag.langgraph_engine.Path") as mock_path_cls:
+        with patch("harness.dag.langgraph_nodes.Path") as mock_path_cls:
             # Mock the path to exist and have molecule/meta
             mock_path = MagicMock()
             mock_path.exists.return_value = True
@@ -367,7 +367,7 @@ class TestGitLabSubgraph:
         set_module_db(mock_db)
         graph = create_gitlab_subgraph()
 
-        with patch("harness.dag.langgraph_engine.subprocess.run") as mock_run:
+        with patch("harness.dag.langgraph_nodes.subprocess.run") as mock_run:
             # git add succeeds
             # git status returns empty (no changes)
             mock_run.side_effect = [
@@ -387,7 +387,7 @@ class TestGitLabSubgraph:
         set_module_db(mock_db)
         graph = create_gitlab_subgraph()
 
-        with patch("harness.dag.langgraph_engine.subprocess.run") as mock_run:
+        with patch("harness.dag.langgraph_nodes.subprocess.run") as mock_run:
             mock_run.side_effect = [
                 MagicMock(returncode=0),  # git add
                 MagicMock(returncode=0, stdout="M file.txt"),  # git status
@@ -515,7 +515,7 @@ class TestErrorPropagation:
         workflow = create_composed_workflow()
         compiled = workflow.compile()
 
-        with patch("harness.dag.langgraph_engine.Path") as mock_path:
+        with patch("harness.dag.langgraph_nodes.Path") as mock_path:
             mock_path.return_value.exists.return_value = False
 
             result = await compiled.ainvoke(initial_state)

@@ -69,12 +69,12 @@ def _build_mock_stack(role_name: str, tmp_path: Path, *, fail_at_node: str | Non
         }
 
     stack.enter_context(
-        patch("harness.dag.langgraph_engine.validate_role_node", _patched_validate)
+        patch("harness.dag.langgraph_builder.validate_role_node", _patched_validate)
     )
 
     # Test result recording (no-op for E2E)
     stack.enter_context(
-        patch("harness.dag.langgraph_engine._record_test_result")
+        patch("harness.dag.langgraph_nodes._record_test_result")
     )
 
     # Subprocess mock
@@ -143,13 +143,13 @@ def _build_mock_stack(role_name: str, tmp_path: Path, *, fail_at_node: str | Non
 
     # Notifications
     stack.enter_context(
-        patch("harness.dag.langgraph_engine.notify_workflow_started", new_callable=AsyncMock)
+        patch("harness.dag.langgraph_runner.notify_workflow_started", new_callable=AsyncMock)
     )
     stack.enter_context(
-        patch("harness.dag.langgraph_engine.notify_workflow_completed", new_callable=AsyncMock)
+        patch("harness.dag.langgraph_runner.notify_workflow_completed", new_callable=AsyncMock)
     )
     stack.enter_context(
-        patch("harness.dag.langgraph_engine.notify_workflow_failed", new_callable=AsyncMock)
+        patch("harness.dag.langgraph_runner.notify_workflow_failed", new_callable=AsyncMock)
     )
 
     # Auto-approve human approval (patch the node function before graph build)
@@ -161,7 +161,7 @@ def _build_mock_stack(role_name: str, tmp_path: Path, *, fail_at_node: str | Non
         }
 
     stack.enter_context(
-        patch("harness.dag.langgraph_engine.human_approval_node", _auto_approve)
+        patch("harness.dag.langgraph_builder.human_approval_node", _auto_approve)
     )
 
     return stack

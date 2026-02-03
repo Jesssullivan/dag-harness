@@ -83,12 +83,12 @@ def _patch_all_externals(role_name: str, tmp_path: Path, *, auto_approve: bool =
         }
 
     stack.enter_context(
-        patch("harness.dag.langgraph_engine.validate_role_node", _patched_validate)
+        patch("harness.dag.langgraph_builder.validate_role_node", _patched_validate)
     )
 
     # -- Test result recording (no-op for E2E) ---------------------------
     stack.enter_context(
-        patch("harness.dag.langgraph_engine._record_test_result")
+        patch("harness.dag.langgraph_nodes._record_test_result")
     )
 
     # -- Human approval auto-approve -------------------------------------
@@ -102,7 +102,7 @@ def _patch_all_externals(role_name: str, tmp_path: Path, *, auto_approve: bool =
 
         stack.enter_context(
             patch(
-                "harness.dag.langgraph_engine.human_approval_node",
+                "harness.dag.langgraph_builder.human_approval_node",
                 _auto_approve_node,
             )
         )
@@ -177,13 +177,13 @@ def _patch_all_externals(role_name: str, tmp_path: Path, *, auto_approve: bool =
 
     # -- Notifications (no-op) -------------------------------------------
     stack.enter_context(
-        patch("harness.dag.langgraph_engine.notify_workflow_started", new_callable=AsyncMock)
+        patch("harness.dag.langgraph_runner.notify_workflow_started", new_callable=AsyncMock)
     )
     stack.enter_context(
-        patch("harness.dag.langgraph_engine.notify_workflow_completed", new_callable=AsyncMock)
+        patch("harness.dag.langgraph_runner.notify_workflow_completed", new_callable=AsyncMock)
     )
     stack.enter_context(
-        patch("harness.dag.langgraph_engine.notify_workflow_failed", new_callable=AsyncMock)
+        patch("harness.dag.langgraph_runner.notify_workflow_failed", new_callable=AsyncMock)
     )
 
     return stack, mock_client
@@ -301,15 +301,15 @@ class TestBoxUpWorkflowE2E:
         # Patch only notifications (we want real validate_role_node to fail)
         with (
             patch(
-                "harness.dag.langgraph_engine.notify_workflow_started",
+                "harness.dag.langgraph_runner.notify_workflow_started",
                 new_callable=AsyncMock,
             ),
             patch(
-                "harness.dag.langgraph_engine.notify_workflow_completed",
+                "harness.dag.langgraph_runner.notify_workflow_completed",
                 new_callable=AsyncMock,
             ),
             patch(
-                "harness.dag.langgraph_engine.notify_workflow_failed",
+                "harness.dag.langgraph_runner.notify_workflow_failed",
                 new_callable=AsyncMock,
             ),
         ):
