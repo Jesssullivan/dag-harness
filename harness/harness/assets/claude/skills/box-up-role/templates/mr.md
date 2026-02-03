@@ -2,12 +2,32 @@
 
 Closes #{{ issue_iid }}
 
-Adds the `{{ role_name }}` Ansible role with full molecule testing and deployment automation.
+{% if is_new_role %}
+**NEW ROLE**: Adds the `{{ role_name }}` Ansible role with full molecule testing and deployment automation.
+{% else %}
+**VALIDATION**: Re-validates existing `{{ role_name }}` role with molecule testing.
+
+{% if role_diff_stat %}
+### Changes from main
+```
+{{ role_diff_stat }}
+```
+{% else %}
+> No file changes detected - validation run only.
+{% endif %}
+{% endif %}
 
 **Wave**: {{ wave_number }} ({{ wave_name }})
 
+---
+
+{{ test_evidence }}
+
+---
+
 ## Changes
 
+{% if is_new_role %}
 ### Role Implementation
 - `ansible/roles/{{ role_name }}/` - Complete role implementation
   - `tasks/main.yml` - Main task execution
@@ -18,6 +38,13 @@ Adds the `{{ role_name }}` Ansible role with full molecule testing and deploymen
 ### Integration
 - `package.json` - npm scripts for deployment
 - `ansible/site.yml` - Tag integration for `--tags {{ role_tags }}`
+{% else %}
+### Validation Only
+This MR validates the existing `{{ role_name }}` role passes molecule tests.
+{% if role_diff_stat %}
+See diff stat above for any changes made.
+{% endif %}
+{% endif %}
 
 {% if credentials %}
 ### Credentials (KeePassXC)
@@ -82,14 +109,14 @@ npm run deploy:{{ deploy_target }} -- --tags {{ role_tags }}
 ## Related
 
 {% if explicit_deps %}
-### Dependencies
+### Dependencies (upstream)
 {% for dep in explicit_deps %}
 - Depends on: `{{ dep }}`
 {% endfor %}
 {% endif %}
 
 {% if reverse_deps %}
-### Dependents (roles that use this one)
+### Dependents (downstream roles that use this one)
 {% for dep in reverse_deps %}
 - Used by: `{{ dep }}`
 {% endfor %}

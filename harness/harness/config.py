@@ -63,11 +63,13 @@ def find_repo_python(repo_root: Path) -> str:
 class GitLabConfig:
     """GitLab configuration."""
 
+    base_url: str = "https://gitlab.com/api/v4"
     project_path: str = "bates-ils/projects/ems/ems-mono"
     group_path: str = "bates-ils"
     default_assignee: str = "jsullivan2"
     default_labels: list[str] = field(default_factory=lambda: ["role", "ansible", "molecule"])
     default_iteration: str = "EMS Upgrade"
+    token_env_var: str = "GITLAB_TOKEN"  # Environment variable to read token from
 
 
 @dataclass
@@ -234,25 +236,41 @@ class HarnessConfig:
 
     @classmethod
     def _load_from_file(cls, path: str) -> "HarnessConfig":
-        """Load configuration from YAML file."""
+        """Load configuration from YAML file.
+        
+        Relative paths in the config (repo_root, db_path) are resolved
+        relative to the config file's directory, not the CWD.
+        """
+        config_path = Path(path).resolve()
+        config_dir = config_path.parent
+
         with open(path) as f:
             data = yaml.safe_load(f) or {}
 
         config = cls()
 
+        # Resolve paths relative to config file directory
         if "db_path" in data:
-            config.db_path = data["db_path"]
+            db_path = Path(data["db_path"])
+            if not db_path.is_absolute():
+                db_path = config_dir / db_path
+            config.db_path = str(db_path)
         if "repo_root" in data:
-            config.repo_root = data["repo_root"]
+            repo_root = Path(data["repo_root"])
+            if not repo_root.is_absolute():
+                repo_root = config_dir / repo_root
+            config.repo_root = str(repo_root)
 
         if "gitlab" in data:
             gl = data["gitlab"]
             config.gitlab = GitLabConfig(
+                base_url=gl.get("base_url", config.gitlab.base_url),
                 project_path=gl.get("project_path", config.gitlab.project_path),
                 group_path=gl.get("group_path", config.gitlab.group_path),
                 default_assignee=gl.get("default_assignee", config.gitlab.default_assignee),
                 default_labels=gl.get("default_labels", config.gitlab.default_labels),
                 default_iteration=gl.get("default_iteration", config.gitlab.default_iteration),
+                token_env_var=gl.get("token_env_var", config.gitlab.token_env_var),
             )
 
         if "worktree" in data:
@@ -357,11 +375,13 @@ class HarnessConfig:
             "db_path": self.db_path,
             "repo_root": self.repo_root,
             "gitlab": {
+                "base_url": self.gitlab.base_url,
                 "project_path": self.gitlab.project_path,
                 "group_path": self.gitlab.group_path,
                 "default_assignee": self.gitlab.default_assignee,
                 "default_labels": self.gitlab.default_labels,
                 "default_iteration": self.gitlab.default_iteration,
+                "token_env_var": self.gitlab.token_env_var,
             },
             "worktree": {
                 "base_path": self.worktree.base_path,

@@ -217,6 +217,8 @@ class ValidateRoleNode(Node):
         super().__init__("validate_role", "Validate role exists and extract metadata")
 
     async def execute(self, ctx: NodeContext) -> tuple[NodeResult, dict[str, Any]]:
+        import subprocess
+
         # Use repo_root from context if available
         repo_root = ctx.repo_root or Path.cwd()
         role_path = repo_root / "ansible" / "roles" / ctx.role_name
@@ -231,10 +233,32 @@ class ValidateRoleNode(Node):
         meta_path = role_path / "meta" / "main.yml"
         has_meta = meta_path.exists()
 
+        # Check if role exists on origin/main (NEW vs EXISTING detection)
+        result = subprocess.run(
+            ["git", "ls-tree", "-d", "origin/main", f"ansible/roles/{ctx.role_name}"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+        )
+        is_new_role = not result.stdout.strip()
+
+        # For existing roles, get what changed
+        role_diff_stat = None
+        if not is_new_role:
+            diff_result = subprocess.run(
+                ["git", "diff", "--stat", "origin/main", "--", f"ansible/roles/{ctx.role_name}"],
+                capture_output=True,
+                text=True,
+                cwd=str(repo_root),
+            )
+            role_diff_stat = diff_result.stdout.strip() if diff_result.stdout.strip() else None
+
         return NodeResult.SUCCESS, {
             "role_path": str(role_path),
             "has_molecule_tests": has_molecule,
             "has_meta": has_meta,
+            "is_new_role": is_new_role,
+            "role_diff_stat": role_diff_stat,
         }
 
 
@@ -515,7 +539,13 @@ class RunMoleculeTestsNode(Node):
                     "error": "Molecule tests failed",
                 }
 
-            return NodeResult.SUCCESS, {"molecule_passed": True, "molecule_duration": duration}
+            return NodeResult.SUCCESS, {
+                "molecule_passed": True,
+                "molecule_duration": duration,
+                "molecule_command": f"npm run molecule:role --role={ctx.role_name}",
+                "molecule_target": "vmnode852",
+                "molecule_summary": result.stdout[-500:] if result.stdout else "",
+            }
 
         except subprocess.TimeoutExpired:
             return NodeResult.FAILURE, {
@@ -617,19 +647,20 @@ class PushBranchNode(Node):
             return NodeResult.FAILURE, {"error": str(e)}
 
 
-class CreateGitLabIssueNode(Node):
-    """Create GitLab issue with iteration assignment."""
+class _GitLabNodeMixin:
+    """Shared utilities for GitLab issue/MR nodes using pure HTTP API."""
 
-    def __init__(self):
-        super().__init__("create_gitlab_issue", "Create GitLab issue")
+    @staticmethod
+    def _get_gitlab_api_config(repo_root: Path) -> "GitLabAPIConfig":
+        """Get GitLab API config from harness.yml and environment."""
+        from harness.gitlab.http_client import GitLabAPIConfig
+        return GitLabAPIConfig.from_harness_yml(repo_root)
 
-    def _get_env_with_venv(self, repo_root: Path) -> dict[str, str]:
-        """Get environment with venv's bin directory in PATH."""
+    @staticmethod
+    def _load_env_vars(repo_root: Path) -> None:
+        """Load .env file into os.environ for GITLAB_TOKEN access."""
         import os
 
-        env = os.environ.copy()
-
-        # Load .env file
         env_file = repo_root / ".env"
         if env_file.exists():
             with open(env_file) as f:
@@ -643,66 +674,43 @@ class CreateGitLabIssueNode(Node):
                         key, _, value = line.partition("=")
                         key = key.strip()
                         value = value.strip().strip('"').strip("'")
-                        if key and value:
-                            env[key] = value
+                        if key and value and key not in os.environ:
+                            os.environ[key] = value
 
-        # Prepend venv's bin to PATH
-        venv_bin = repo_root / ".venv" / "bin"
-        if venv_bin.exists():
-            env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
 
-        return env
+class CreateGitLabIssueNode(_GitLabNodeMixin, Node):
+    """Create GitLab issue with iteration assignment using pure HTTP API."""
+
+    def __init__(self):
+        super().__init__("create_gitlab_issue", "Create GitLab issue")
 
     async def execute(self, ctx: NodeContext) -> tuple[NodeResult, dict[str, Any]]:
-        import json
-        import subprocess
+        from harness.gitlab.http_client import GitLabAPI, GitLabAPIError
 
         repo_root = ctx.repo_root or Path.cwd()
-        env = self._get_env_with_venv(repo_root)
 
-        import re
+        # Load .env to ensure GITLAB_TOKEN is available
+        self._load_env_vars(repo_root)
+
+        # Get API config from harness.yml
+        api_config = self._get_gitlab_api_config(repo_root)
+
+        if not api_config.token:
+            return NodeResult.FAILURE, {
+                "error": "No GITLAB_TOKEN found. Set GITLAB_TOKEN environment variable or add token_env_var to harness.yml"
+            }
+
+        if not api_config.project_path:
+            return NodeResult.FAILURE, {
+                "error": "No project_path configured in harness.yml gitlab section"
+            }
 
         # Use wave info from context (already computed by analyze_dependencies)
         wave = ctx.get("wave", 0)
         wave_name = ctx.get("wave_name", "Unassigned")
 
-        try:
-            # IDEMPOTENCY: First check if an open issue already exists for this role
-            search_result = subprocess.run(
-                ["glab", "issue", "list", "--search", f"Deploy `{ctx.role_name}`", "--state", "opened"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=str(repo_root),
-                env=env,
-            )
-
-            # Parse existing issue if found
-            if search_result.returncode == 0 and search_result.stdout.strip():
-                # Look for issue ID pattern like "#123" or "ID: 123"
-                existing_match = re.search(r'#(\d+)\s+Deploy\s+`' + re.escape(ctx.role_name) + r'`', search_result.stdout)
-                if existing_match:
-                    issue_iid = existing_match.group(1)
-                    # Get the issue URL
-                    view_result = subprocess.run(
-                        ["glab", "issue", "view", issue_iid, "--web", "--no-open"],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                        cwd=str(repo_root),
-                        env=env,
-                    )
-                    url_match = re.search(r'(https://[^\s]+/issues/\d+)', view_result.stdout + view_result.stderr)
-                    if url_match:
-                        return NodeResult.SUCCESS, {
-                            "issue_url": url_match.group(1),
-                            "issue_iid": issue_iid,
-                            "issue_reused": True,
-                        }
-
-            # No existing issue found, create a new one
-            title = f"Deploy `{ctx.role_name}` role (Wave {wave})"
-            description = f"""## Role: {ctx.role_name}
+        title = f"Deploy `{ctx.role_name}` role (Wave {wave})"
+        description = f"""## Role: {ctx.role_name}
 
 **Wave**: {wave} - {wave_name}
 
@@ -715,209 +723,115 @@ class CreateGitLabIssueNode(Node):
 *Created by dag-harness*
 """
 
-            result = subprocess.run(
-                [
-                    "glab", "issue", "create",
-                    "--title", title,
-                    "--description", description,
-                    "--label", "role,ansible,molecule",
-                    "--assignee", "jsullivan2",
-                    "--yes",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                cwd=str(repo_root),
-                env=env,
-            )
+        try:
+            async with GitLabAPI(api_config) as api:
+                # IDEMPOTENCY: get_or_create_issue handles finding existing issues
+                issue, created = await api.get_or_create_issue(
+                    search=f"Deploy `{ctx.role_name}`",
+                    title=title,
+                    description=description,
+                    labels=api_config.default_labels,
+                    assignee_username=api_config.default_assignee,
+                )
 
-            if result.returncode != 0:
-                return NodeResult.FAILURE, {
-                    "error": f"glab issue create failed: {result.stderr}",
-                    "stdout": result.stdout,
+                return NodeResult.SUCCESS, {
+                    "issue_url": issue.get("web_url", ""),
+                    "issue_iid": str(issue.get("iid", "")),
+                    "issue_reused": not created,
                 }
 
-            # Parse issue URL from glab output
-            url_match = re.search(r'(https://[^\s]+/issues/\d+)', result.stdout + result.stderr)
-            if url_match:
-                issue_url = url_match.group(1)
-                iid_match = re.search(r'/issues/(\d+)', issue_url)
-                issue_iid = iid_match.group(1) if iid_match else None
-            else:
-                return NodeResult.FAILURE, {
-                    "error": "Could not parse issue URL from glab output",
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                }
-
-            return NodeResult.SUCCESS, {
-                "issue_url": issue_url,
-                "issue_iid": issue_iid,
-                "issue_reused": False,
+        except GitLabAPIError as e:
+            return NodeResult.FAILURE, {
+                "error": f"GitLab API error: {e}",
+                "status_code": e.status_code,
             }
-
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
             return NodeResult.RETRY, {"error": "Issue creation timed out"}
         except Exception as e:
             return NodeResult.FAILURE, {"error": str(e)}
 
 
-class CreateMergeRequestNode(Node):
-    """Create GitLab merge request."""
+class CreateMergeRequestNode(_GitLabNodeMixin, Node):
+    """Create GitLab merge request using pure HTTP API."""
 
     def __init__(self):
         super().__init__("create_merge_request", "Create GitLab merge request")
 
-    def _get_env_with_venv(self, repo_root: Path) -> dict[str, str]:
-        """Get environment with venv's bin directory in PATH."""
-        import os
-
-        env = os.environ.copy()
-
-        # Load .env file
-        env_file = repo_root / ".env"
-        if env_file.exists():
-            with open(env_file) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if line.startswith("export "):
-                        line = line[7:]
-                    if "=" in line:
-                        key, _, value = line.partition("=")
-                        key = key.strip()
-                        value = value.strip().strip('"').strip("'")
-                        if key and value:
-                            env[key] = value
-
-        # Prepend venv's bin to PATH
-        venv_bin = repo_root / ".venv" / "bin"
-        if venv_bin.exists():
-            env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
-
-        return env
-
     async def execute(self, ctx: NodeContext) -> tuple[NodeResult, dict[str, Any]]:
-        import re
-        import subprocess
+        from harness.gitlab.http_client import GitLabAPI, GitLabAPIError
+        from harness.gitlab.templates import render_mr_description
 
         repo_root = ctx.repo_root or Path.cwd()
-        worktree_path = ctx.get("worktree_path", str(repo_root))
         branch = ctx.get("branch", f"sid/{ctx.role_name}")
-        env = self._get_env_with_venv(repo_root)
         issue_iid = ctx.get("issue_iid")
+
+        # Load .env to ensure GITLAB_TOKEN is available
+        self._load_env_vars(repo_root)
+
+        # Get API config from harness.yml
+        api_config = self._get_gitlab_api_config(repo_root)
+
+        if not api_config.token:
+            return NodeResult.FAILURE, {
+                "error": "No GITLAB_TOKEN found. Set GITLAB_TOKEN environment variable or add token_env_var to harness.yml"
+            }
+
+        if not api_config.project_path:
+            return NodeResult.FAILURE, {
+                "error": "No project_path configured in harness.yml gitlab section"
+            }
 
         # Get wave info from context
         wave = ctx.get("wave", 0)
         wave_name = ctx.get("wave_name", "Unassigned")
 
+        # Build template context from workflow state
+        template_ctx = {
+            "role_name": ctx.role_name,
+            "issue_iid": issue_iid,
+            "wave": wave,
+            "wave_name": wave_name,
+            "is_new_role": ctx.get("is_new_role", True),
+            "role_diff_stat": ctx.get("role_diff_stat"),
+            "molecule_passed": ctx.get("molecule_passed"),
+            "molecule_duration": ctx.get("molecule_duration"),
+            "molecule_stderr": ctx.get("molecule_stderr"),
+            "molecule_skipped": ctx.get("molecule_skipped", False),
+            "deploy_target": "vmnode852",
+            "tags": ctx.get("tags", []),
+            "credentials": ctx.get("credentials", []),
+            "explicit_deps": ctx.get("explicit_deps", []),
+            "reverse_deps": ctx.get("reverse_deps", []),
+            "assignee": api_config.default_assignee,
+        }
+
+        title = f"feat({ctx.role_name}): Deploy {ctx.role_name} role (Wave {wave})"
+        description = render_mr_description(template_ctx)
+
         try:
-            # IDEMPOTENCY: First check if an open MR already exists for this branch
-            search_result = subprocess.run(
-                ["glab", "mr", "list", "--source-branch", branch, "--state", "opened"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=str(repo_root),
-                env=env,
-            )
+            async with GitLabAPI(api_config) as api:
+                # IDEMPOTENCY: get_or_create_mr handles finding existing MRs
+                mr, created = await api.get_or_create_mr(
+                    source_branch=branch,
+                    target_branch="main",
+                    title=title,
+                    description=description,
+                    labels=api_config.default_labels,
+                    assignee_username=api_config.default_assignee,
+                )
 
-            if search_result.returncode == 0 and search_result.stdout.strip():
-                # Look for MR ID pattern like "!123"
-                existing_match = re.search(r'!(\d+)', search_result.stdout)
-                if existing_match:
-                    mr_iid = existing_match.group(1)
-                    # Get the MR URL
-                    view_result = subprocess.run(
-                        ["glab", "mr", "view", mr_iid],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                        cwd=str(repo_root),
-                        env=env,
-                    )
-                    url_match = re.search(r'url:\s+(https://[^\s]+)', view_result.stdout)
-                    if url_match:
-                        return NodeResult.SUCCESS, {
-                            "mr_url": url_match.group(1),
-                            "mr_iid": mr_iid,
-                            "mr_reused": True,
-                        }
-
-            # No existing MR found, create a new one
-            title = f"feat({ctx.role_name}): Deploy {ctx.role_name} role (Wave {wave})"
-            description = f"""## Summary
-Deploy `{ctx.role_name}` Ansible role.
-
-**Wave**: {wave} - {wave_name}
-
-Closes #{issue_iid}
-
-### Checklist
-- [x] Molecule tests passing
-- [ ] Code review complete
-- [ ] Ready for merge
-
----
-*Created by dag-harness*
-"""
-
-            result = subprocess.run(
-                [
-                    "glab", "mr", "create",
-                    "--title", title,
-                    "--description", description,
-                    "--assignee", "jsullivan2",
-                    "--yes",
-                    "--push",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=worktree_path,
-                env=env,
-            )
-
-            if result.returncode != 0:
-                # Normalize whitespace for checking (GitLab errors can span multiple lines)
-                stderr_normalized = " ".join(result.stderr.split())
-
-                # Check if error is "MR already exists" - handle gracefully
-                if "Another open merge request already exists" in stderr_normalized or "409" in stderr_normalized:
-                    # Try to find the existing MR ID in the error message
-                    mr_match = re.search(r'!(\d+)', result.stderr)
-                    if mr_match:
-                        mr_iid = mr_match.group(1)
-                        return NodeResult.SUCCESS, {
-                            "mr_url": f"https://gitlab.com/bates-ils/projects/ems/ems-mono/-/merge_requests/{mr_iid}",
-                            "mr_iid": mr_iid,
-                            "mr_reused": True,
-                        }
-                return NodeResult.FAILURE, {
-                    "error": f"glab mr create failed: {stderr_normalized[:500]}",
-                    "stdout": result.stdout,
+                return NodeResult.SUCCESS, {
+                    "mr_url": mr.get("web_url", ""),
+                    "mr_iid": str(mr.get("iid", "")),
+                    "mr_reused": not created,
                 }
 
-            # Parse MR URL from glab output
-            url_match = re.search(r'(https://[^\s]+/merge_requests/\d+)', result.stdout + result.stderr)
-            if url_match:
-                mr_url = url_match.group(1)
-                iid_match = re.search(r'/merge_requests/(\d+)', mr_url)
-                mr_iid = iid_match.group(1) if iid_match else None
-            else:
-                return NodeResult.FAILURE, {
-                    "error": "Could not parse MR URL from glab output",
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                }
-
-            return NodeResult.SUCCESS, {
-                "mr_url": mr_url,
-                "mr_iid": mr_iid,
+        except GitLabAPIError as e:
+            return NodeResult.FAILURE, {
+                "error": f"GitLab API error: {e}",
+                "status_code": e.status_code,
             }
-
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
             return NodeResult.RETRY, {"error": "MR creation timed out"}
         except Exception as e:
             return NodeResult.FAILURE, {"error": str(e)}
