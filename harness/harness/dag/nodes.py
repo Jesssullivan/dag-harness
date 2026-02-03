@@ -448,7 +448,31 @@ class RunMoleculeTestsNode(Node):
 
     def __init__(self):
         super().__init__("run_molecule_tests", "Execute molecule tests (blocking)")
-        self.timeout_seconds = 600  # 10 minutes
+        self.timeout_seconds = 1200  # 20 minutes
+
+    def _load_env_file(self, repo_root: Path) -> dict[str, str]:
+        """Load environment variables from .env file."""
+        import os
+
+        env = os.environ.copy()
+        env_file = repo_root / ".env"
+
+        if env_file.exists():
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    # Handle 'export VAR=value' and 'VAR=value'
+                    if line.startswith("export "):
+                        line = line[7:]
+                    if "=" in line:
+                        key, _, value = line.partition("=")
+                        key = key.strip()
+                        value = value.strip().strip('"').strip("'")
+                        if key and value:
+                            env[key] = value
+        return env
 
     async def execute(self, ctx: NodeContext) -> tuple[NodeResult, dict[str, Any]]:
         import subprocess
@@ -461,23 +485,33 @@ class RunMoleculeTestsNode(Node):
         worktree_path = ctx.get("worktree_path")
         cwd = worktree_path if worktree_path else str(repo_root)
 
+        # Load .env file from repo root for credentials
+        env = self._load_env_file(repo_root)
+
+        # Determine molecule command - use repo's venv
+        molecule_cmd = str(repo_root / ".venv" / "bin" / "molecule")
+        role_dir = repo_root / "ansible" / "roles" / ctx.role_name
+
         start_time = time.time()
         try:
             result = subprocess.run(
-                ["npm", "run", "molecule:role", f"--role={ctx.role_name}"],
+                [molecule_cmd, "test"],
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
-                cwd=cwd,
+                cwd=str(role_dir),
+                env=env,
             )
 
             duration = int(time.time() - start_time)
 
-            if result.returncode not in (0, 2):
+            if result.returncode != 0:
                 return NodeResult.FAILURE, {
                     "molecule_passed": False,
                     "molecule_duration": duration,
-                    "molecule_output": result.stdout[-5000:],  # Last 5KB
+                    "molecule_stdout": result.stdout[-5000:] if result.stdout else "",
+                    "molecule_stderr": result.stderr[-5000:] if result.stderr else "",
+                    "returncode": result.returncode,
                     "error": "Molecule tests failed",
                 }
 
@@ -589,36 +623,114 @@ class CreateGitLabIssueNode(Node):
     def __init__(self):
         super().__init__("create_gitlab_issue", "Create GitLab issue")
 
+    def _get_env_with_venv(self, repo_root: Path) -> dict[str, str]:
+        """Get environment with venv's bin directory in PATH."""
+        import os
+
+        env = os.environ.copy()
+
+        # Load .env file
+        env_file = repo_root / ".env"
+        if env_file.exists():
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("export "):
+                        line = line[7:]
+                    if "=" in line:
+                        key, _, value = line.partition("=")
+                        key = key.strip()
+                        value = value.strip().strip('"').strip("'")
+                        if key and value:
+                            env[key] = value
+
+        # Prepend venv's bin to PATH
+        venv_bin = repo_root / ".venv" / "bin"
+        if venv_bin.exists():
+            env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+
+        return env
+
     async def execute(self, ctx: NodeContext) -> tuple[NodeResult, dict[str, Any]]:
         import json
         import subprocess
 
         repo_root = ctx.repo_root or Path.cwd()
+        env = self._get_env_with_venv(repo_root)
+
+        # Use wave info from context (already computed by analyze_dependencies)
+        wave = ctx.get("wave", 0)
+        wave_name = ctx.get("wave_name", "Unassigned")
+
+        # Build issue title and description
+        title = f"Deploy `{ctx.role_name}` role (Wave {wave})"
+        description = f"""## Role: {ctx.role_name}
+
+**Wave**: {wave} - {wave_name}
+
+### Checklist
+- [ ] Molecule tests passing
+- [ ] Code review complete
+- [ ] Ready for merge train
+
+---
+*Created by dag-harness*
+"""
 
         try:
+            # Use glab CLI directly
             result = subprocess.run(
-                ["scripts/create-gitlab-issues.sh", ctx.role_name, "--json"],
+                [
+                    "glab", "issue", "create",
+                    "--title", title,
+                    "--description", description,
+                    "--label", "role,ansible,molecule",
+                    "--assignee", "jsullivan2",
+                    "--yes",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=60,
                 cwd=str(repo_root),
+                env=env,
             )
 
-            if result.returncode not in (0, 2):
-                return NodeResult.FAILURE, {"error": result.stderr}
+            if result.returncode != 0:
+                return NodeResult.FAILURE, {
+                    "error": f"glab issue create failed: {result.stderr}",
+                    "stdout": result.stdout,
+                }
 
-            issue_data = json.loads(result.stdout)
+            # Parse issue URL from glab output (format: "https://gitlab.com/.../issues/123")
+            import re
+            url_match = re.search(r'(https://[^\s]+/issues/\d+)', result.stdout)
+            if url_match:
+                issue_url = url_match.group(1)
+                iid_match = re.search(r'/issues/(\d+)', issue_url)
+                issue_iid = iid_match.group(1) if iid_match else None
+            else:
+                # Try stderr too (glab sometimes outputs URL there)
+                url_match = re.search(r'(https://[^\s]+/issues/\d+)', result.stderr)
+                if url_match:
+                    issue_url = url_match.group(1)
+                    iid_match = re.search(r'/issues/(\d+)', issue_url)
+                    issue_iid = iid_match.group(1) if iid_match else None
+                else:
+                    return NodeResult.FAILURE, {
+                        "error": "Could not parse issue URL from glab output",
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                    }
+
             return NodeResult.SUCCESS, {
-                "issue_url": issue_data.get("issue_url"),
-                "issue_iid": issue_data.get("issue_iid"),
-                "iteration_assigned": issue_data.get("iteration_id") is not None,
+                "issue_url": issue_url,
+                "issue_iid": issue_iid,
             }
 
         except subprocess.TimeoutExpired:
             return NodeResult.RETRY, {"error": "Issue creation timed out"}
-        except json.JSONDecodeError:
-            # Try to extract URL from non-JSON output
-            return NodeResult.FAILURE, {"error": "Failed to parse issue creation output"}
         except Exception as e:
             return NodeResult.FAILURE, {"error": str(e)}
 
@@ -629,32 +741,108 @@ class CreateMergeRequestNode(Node):
     def __init__(self):
         super().__init__("create_merge_request", "Create GitLab merge request")
 
+    def _get_env_with_venv(self, repo_root: Path) -> dict[str, str]:
+        """Get environment with venv's bin directory in PATH."""
+        import os
+
+        env = os.environ.copy()
+
+        # Load .env file
+        env_file = repo_root / ".env"
+        if env_file.exists():
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("export "):
+                        line = line[7:]
+                    if "=" in line:
+                        key, _, value = line.partition("=")
+                        key = key.strip()
+                        value = value.strip().strip('"').strip("'")
+                        if key and value:
+                            env[key] = value
+
+        # Prepend venv's bin to PATH
+        venv_bin = repo_root / ".venv" / "bin"
+        if venv_bin.exists():
+            env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+
+        return env
+
     async def execute(self, ctx: NodeContext) -> tuple[NodeResult, dict[str, Any]]:
-        import json
+        import re
         import subprocess
 
         repo_root = ctx.repo_root or Path.cwd()
+        worktree_path = ctx.get("worktree_path", str(repo_root))
+        env = self._get_env_with_venv(repo_root)
         issue_iid = ctx.get("issue_iid")
+        issue_url = ctx.get("issue_url", "")
 
-        if not issue_iid:
-            return NodeResult.FAILURE, {"error": "No issue IID available"}
+        # Get wave info from context
+        wave = ctx.get("wave", 0)
+        wave_name = ctx.get("wave_name", "Unassigned")
+
+        # Build MR title and description
+        title = f"feat({ctx.role_name}): Deploy {ctx.role_name} role (Wave {wave})"
+        description = f"""## Summary
+Deploy `{ctx.role_name}` Ansible role.
+
+**Wave**: {wave} - {wave_name}
+
+Closes #{issue_iid}
+
+### Checklist
+- [x] Molecule tests passing
+- [ ] Code review complete
+- [ ] Ready for merge
+
+---
+*Created by dag-harness*
+"""
 
         try:
+            # Use glab CLI directly from the worktree
             result = subprocess.run(
-                ["scripts/create-gitlab-mr.sh", ctx.role_name, "--issue", str(issue_iid), "--json"],
+                [
+                    "glab", "mr", "create",
+                    "--title", title,
+                    "--description", description,
+                    "--assignee", "jsullivan2",
+                    "--yes",
+                    "--push",
+                ],
                 capture_output=True,
                 text=True,
-                timeout=60,
-                cwd=str(repo_root),
+                timeout=120,
+                cwd=worktree_path,
+                env=env,
             )
 
-            if result.returncode not in (0, 2):
-                return NodeResult.FAILURE, {"error": result.stderr}
+            if result.returncode != 0:
+                return NodeResult.FAILURE, {
+                    "error": f"glab mr create failed: {result.stderr}",
+                    "stdout": result.stdout,
+                }
 
-            mr_data = json.loads(result.stdout)
+            # Parse MR URL from glab output
+            url_match = re.search(r'(https://[^\s]+/merge_requests/\d+)', result.stdout + result.stderr)
+            if url_match:
+                mr_url = url_match.group(1)
+                iid_match = re.search(r'/merge_requests/(\d+)', mr_url)
+                mr_iid = iid_match.group(1) if iid_match else None
+            else:
+                return NodeResult.FAILURE, {
+                    "error": "Could not parse MR URL from glab output",
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }
+
             return NodeResult.SUCCESS, {
-                "mr_url": mr_data.get("mr_url"),
-                "mr_iid": mr_data.get("mr_iid"),
+                "mr_url": mr_url,
+                "mr_iid": mr_iid,
             }
 
         except subprocess.TimeoutExpired:
