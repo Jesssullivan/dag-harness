@@ -6,6 +6,7 @@ Nodes are async for consistency with LangGraph patterns.
 """
 
 import logging
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -21,6 +22,57 @@ from harness.dag.langgraph_state import (
 from harness.db.models import TestType
 
 logger = logging.getLogger(__name__)
+
+
+def _load_env_file(env_path: Path) -> dict[str, str]:
+    """Load environment variables from a .env file.
+
+    Returns a dict that can be merged with os.environ for subprocess calls.
+    """
+    env = {}
+    if not env_path.exists():
+        return env
+
+    try:
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Handle export VAR=value and VAR=value formats
+                if line.startswith("export "):
+                    line = line[7:]
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    # Remove quotes if present
+                    value = value.strip().strip('"').strip("'")
+                    env[key.strip()] = value
+    except Exception as e:
+        logger.warning(f"Failed to load .env file {env_path}: {e}")
+
+    return env
+
+
+def _get_subprocess_env(worktree_path: str) -> dict[str, str]:
+    """Get environment variables for subprocess calls.
+
+    Merges current environment with .env file from ansible directory.
+    """
+    env = os.environ.copy()
+
+    # Look for .env file in ansible directory
+    ansible_env = Path(worktree_path) / "ansible" / ".env"
+    if ansible_env.exists():
+        env.update(_load_env_file(ansible_env))
+        logger.debug(f"Loaded environment from {ansible_env}")
+
+    # Also check repo root .env
+    root_env = Path(worktree_path) / ".env"
+    if root_env.exists():
+        env.update(_load_env_file(root_env))
+        logger.debug(f"Loaded environment from {root_env}")
+
+    return env
 
 
 # ============================================================================
@@ -226,13 +278,23 @@ async def run_molecule_node(state: BoxUpRoleState) -> dict:
     start_time = time.time()
     test_name = f"molecule:{role_name}"
 
+    # Get timeout from config
+    harness_config = get_module_config()
+    timeout = 600  # default 10 minutes
+    if harness_config and hasattr(harness_config, "testing"):
+        timeout = harness_config.testing.molecule_timeout
+
     try:
+        # Load environment variables from .env files
+        env = _get_subprocess_env(worktree_path)
+
         result = subprocess.run(
             ["npm", "run", "molecule:role", f"--role={role_name}"],
             capture_output=True,
             text=True,
-            timeout=600,  # 10 minutes
+            timeout=timeout,
             cwd=worktree_path,
+            env=env,
         )
 
         duration = int(time.time() - start_time)
@@ -275,7 +337,7 @@ async def run_molecule_node(state: BoxUpRoleState) -> dict:
             test_name,
             TestType.MOLECULE,
             passed=False,
-            error_message="Test timed out after 600 seconds",
+            error_message=f"Test timed out after {timeout} seconds",
             execution_id=execution_id,
         )
         return {
@@ -309,12 +371,16 @@ async def run_pytest_node(state: BoxUpRoleState) -> dict:
     test_name = f"pytest:{role_name}"
 
     try:
+        # Load environment variables from .env files
+        env = _get_subprocess_env(worktree_path)
+
         result = subprocess.run(
             ["pytest", str(test_path), "-v", "--tb=short"],
             capture_output=True,
             text=True,
             timeout=300,  # 5 minutes
             cwd=worktree_path,
+            env=env,
         )
 
         duration = int(time.time() - start_time)

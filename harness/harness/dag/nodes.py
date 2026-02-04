@@ -454,7 +454,7 @@ class RunMoleculeTestsNode(Node):
 
     def __init__(self):
         super().__init__("run_molecule_tests", "Execute molecule tests (blocking)")
-        self.timeout_seconds = 1200  # 20 minutes
+        self.timeout_seconds = 1800  # 30 minutes
 
     def _load_env_file(self, repo_root: Path) -> dict[str, str]:
         """Load environment variables from .env file."""
