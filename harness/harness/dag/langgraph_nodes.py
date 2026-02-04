@@ -285,7 +285,11 @@ async def create_worktree_node(state: BoxUpRoleState) -> dict:
                     text=True,
                 )
 
-        worktree_info = manager.create(role_name, force=force_recreate)
+        # For new roles (not on origin/main), create from HEAD to include the role content
+        # For existing roles, create from origin/main to get the latest mainline state
+        is_new_role = state.get("is_new_role", True)
+        base_ref = "HEAD" if is_new_role else None  # None = default to origin/main
+        worktree_info = manager.create(role_name, force=force_recreate, base_ref=base_ref)
 
         return {
             "worktree_path": worktree_info.path,
@@ -322,11 +326,16 @@ async def create_worktree_node(state: BoxUpRoleState) -> dict:
         # No existing worktree in db - for recoverable errors, attempt self-correction
         if error.error_type == ErrorType.RECOVERABLE and not force_recreate:
             if should_attempt_recovery(state, "create_worktree"):
-                # Signal force recreate for retry
+                # Get the appropriate resolution based on the error hint
+                from harness.dag.error_resolution import attempt_resolution
+                resolution = attempt_resolution(error.resolution_hint, error.context, state)
+                if resolution is None:
+                    # Fallback to worktree force recreate
+                    resolution = {"worktree_force_recreate": True}
                 update = create_recovery_state_update(
                     "create_worktree",
                     error,
-                    {"worktree_force_recreate": True},
+                    resolution,
                 )
                 # Don't mark as completed - we're retrying
                 return update

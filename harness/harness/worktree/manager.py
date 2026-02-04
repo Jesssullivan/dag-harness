@@ -111,13 +111,17 @@ class WorktreeManager:
             status=status,
         )
 
-    def create(self, role_name: str, force: bool = False) -> WorktreeInfo:
+    def create(
+        self, role_name: str, force: bool = False, base_ref: str | None = None
+    ) -> WorktreeInfo:
         """
         Create a worktree for a role.
 
         Args:
             role_name: Name of the role
             force: If True, remove existing worktree first
+            base_ref: Git ref to create the worktree from. If None, uses origin/main.
+                     For new roles not on main, pass HEAD or current branch.
 
         Returns:
             WorktreeInfo for the created worktree
@@ -133,11 +137,14 @@ class WorktreeManager:
             else:
                 raise ValueError(f"Worktree already exists at {worktree_path}")
 
-        # Fetch latest from origin
-        self._run_git("fetch", "origin", "main")
+        # Determine the base ref for the worktree
+        if base_ref is None:
+            # Default: fetch and use origin/main
+            self._run_git("fetch", "origin", "main")
+            base_ref = "origin/main"
 
-        # Create worktree with new branch from origin/main
-        result = self._run_git("worktree", "add", "-b", branch, worktree_path, "origin/main")
+        # Create worktree with new branch from the specified base
+        result = self._run_git("worktree", "add", "-b", branch, worktree_path, base_ref)
 
         if result.returncode != 0:
             raise RuntimeError(f"Failed to create worktree: {result.stderr}")
