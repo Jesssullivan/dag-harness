@@ -81,8 +81,13 @@ def _get_subprocess_env(worktree_path: str) -> dict[str, str]:
 
 
 async def validate_role_node(state: BoxUpRoleState) -> dict:
-    """Validate that the role exists and extract metadata."""
+    """Validate that the role exists and extract metadata.
+
+    Also detects if this is a NEW role (not on origin/main) or an EXISTING
+    role being re-validated. This affects the MR description template.
+    """
     role_name = state["role_name"]
+    worktree_path = state.get("worktree_path", ".")
     role_path = Path(f"ansible/roles/{role_name}")
 
     if not role_path.exists():
@@ -94,10 +99,45 @@ async def validate_role_node(state: BoxUpRoleState) -> dict:
     has_molecule = (role_path / "molecule").exists()
     has_meta = (role_path / "meta" / "main.yml").exists()
 
+    # Check if role exists on origin/main to determine NEW vs EXISTING
+    is_new_role = True
+    role_diff_stat = None
+    try:
+        result = subprocess.run(
+            ["git", "ls-tree", "-d", "origin/main", f"ansible/roles/{role_name}"],
+            capture_output=True,
+            text=True,
+            cwd=worktree_path,
+            timeout=30,
+        )
+        # If ls-tree returns output, the role exists on main
+        is_new_role = not result.stdout.strip()
+
+        if not is_new_role:
+            # Get diff stat for existing role changes
+            diff_result = subprocess.run(
+                ["git", "diff", "--stat", "origin/main", "--", f"ansible/roles/{role_name}"],
+                capture_output=True,
+                text=True,
+                cwd=worktree_path,
+                timeout=30,
+            )
+            if diff_result.stdout.strip():
+                role_diff_stat = diff_result.stdout.strip()
+                logger.info(f"Role '{role_name}' exists on main with changes")
+            else:
+                logger.info(f"Role '{role_name}' exists on main with no changes (validation only)")
+    except subprocess.TimeoutExpired:
+        logger.warning("Git ls-tree timed out, assuming new role")
+    except subprocess.SubprocessError as e:
+        logger.warning(f"Git check failed: {e}, assuming new role")
+
     return {
         "role_path": str(role_path),
         "has_molecule_tests": has_molecule,
         "has_meta": has_meta,
+        "is_new_role": is_new_role,
+        "role_diff_stat": role_diff_stat,
         "completed_nodes": ["validate_role"],
     }
 
@@ -190,8 +230,22 @@ async def check_reverse_deps_node(state: BoxUpRoleState) -> dict:
 
 
 async def create_worktree_node(state: BoxUpRoleState) -> dict:
-    """Create git worktree for isolated development using WorktreeManager."""
+    """
+    Create git worktree for isolated development using WorktreeManager.
+
+    Supports self-correction for 'worktree already exists' errors via
+    the worktree_force_recreate flag.
+    """
+    from harness.dag.error_resolution import (
+        ErrorType,
+        classify_error,
+        create_recovery_state_update,
+        should_attempt_recovery,
+    )
+
     role_name = state["role_name"]
+    force_recreate = state.get("worktree_force_recreate", False)
+    branch_force_recreate = state.get("branch_force_recreate", False)
     db = get_module_db()
 
     if db is None:
@@ -210,19 +264,46 @@ async def create_worktree_node(state: BoxUpRoleState) -> dict:
         branch_existed = client.remote_branch_exists(branch_name)
 
         manager = WorktreeManager(db)
-        worktree_info = manager.create(role_name, force=False)
+
+        # Handle force recreate - remove existing worktree and branches first
+        if force_recreate or branch_force_recreate:
+            logger.info(f"Force recreating worktree for {role_name}")
+            try:
+                manager.remove(role_name, force=True)
+            except Exception as e:
+                logger.warning(f"Failed to remove existing worktree: {e}")
+
+            if branch_force_recreate:
+                # Also delete local and remote branch
+                branch = f"sid/{role_name}"
+                subprocess.run(
+                    ["git", "branch", "-D", branch], capture_output=True, text=True
+                )
+                subprocess.run(
+                    ["git", "push", "origin", "--delete", branch],
+                    capture_output=True,
+                    text=True,
+                )
+
+        worktree_info = manager.create(role_name, force=force_recreate)
 
         return {
             "worktree_path": worktree_info.path,
             "branch": worktree_info.branch,
             "commit_sha": worktree_info.commit,
-            "branch_existed": branch_existed,
+            "branch_existed": branch_existed and not branch_force_recreate,
+            # Clear recovery flags on success
+            "worktree_force_recreate": False,
+            "branch_force_recreate": False,
             "completed_nodes": ["create_worktree"],
         }
 
     except ValueError as e:
-        # Worktree already exists - this is not necessarily an error for idempotency
-        # Try to get existing worktree info
+        error_msg = str(e)
+        error = classify_error(error_msg, "create_worktree", state)
+
+        # Worktree already exists - first try to get existing worktree info (idempotency)
+        # This is preferred over force-recreating as it preserves existing work
         try:
             worktree = db.get_worktree(role_name)
             if worktree:
@@ -230,23 +311,76 @@ async def create_worktree_node(state: BoxUpRoleState) -> dict:
                     "worktree_path": worktree.path,
                     "branch": worktree.branch,
                     "commit_sha": worktree.current_commit,
-                    "branch_existed": True,  # If worktree exists, branch likely does too
+                    "branch_existed": True,
+                    "worktree_force_recreate": False,
+                    "branch_force_recreate": False,
                     "completed_nodes": ["create_worktree"],
                 }
         except Exception:
             pass
+
+        # No existing worktree in db - for recoverable errors, attempt self-correction
+        if error.error_type == ErrorType.RECOVERABLE and not force_recreate:
+            if should_attempt_recovery(state, "create_worktree"):
+                # Signal force recreate for retry
+                update = create_recovery_state_update(
+                    "create_worktree",
+                    error,
+                    {"worktree_force_recreate": True},
+                )
+                # Don't mark as completed - we're retrying
+                return update
+
+        # v0.6.0: Return structured error without errors key for recoverable
+        if error.error_type in (ErrorType.RECOVERABLE, ErrorType.USER_FIXABLE):
+            return {
+                "last_error_type": error.error_type.value,
+                "last_error_message": error_msg,
+                "last_error_node": "create_worktree",
+                "recovery_context": error.context,
+                "completed_nodes": ["create_worktree"],
+            }
+
         return {
-            "errors": [str(e)],
+            "errors": [error_msg],
+            "last_error_type": error.error_type.value,
             "completed_nodes": ["create_worktree"],
         }
+
     except RuntimeError as e:
+        error_msg = str(e)
+        error = classify_error(error_msg, "create_worktree", state)
+
+        # Check for recoverable runtime errors
+        if error.error_type == ErrorType.RECOVERABLE and not force_recreate:
+            if should_attempt_recovery(state, "create_worktree"):
+                update = create_recovery_state_update(
+                    "create_worktree",
+                    error,
+                    {"worktree_force_recreate": True},
+                )
+                return update
+
+        # v0.6.0: Structured error for recoverable runtime errors
+        if error.error_type in (ErrorType.RECOVERABLE, ErrorType.USER_FIXABLE):
+            return {
+                "last_error_type": error.error_type.value,
+                "last_error_message": f"Worktree creation failed: {e}",
+                "last_error_node": "create_worktree",
+                "recovery_context": error.context,
+                "completed_nodes": ["create_worktree"],
+            }
+
         return {
             "errors": [f"Worktree creation failed: {e}"],
+            "last_error_type": error.error_type.value,
             "completed_nodes": ["create_worktree"],
         }
+
     except Exception as e:
         return {
             "errors": [str(e)],
+            "last_error_type": "unexpected",
             "completed_nodes": ["create_worktree"],
         }
 
@@ -288,12 +422,17 @@ async def run_molecule_node(state: BoxUpRoleState) -> dict:
         # Load environment variables from .env files
         env = _get_subprocess_env(worktree_path)
 
+        # Run molecule directly instead of using npm script
+        # The worktree may not have the harness npm scripts since it's created from origin/main
+        # Use uv run to ensure molecule from .venv is used
+        molecule_cwd = Path(worktree_path) / "ansible" / "roles" / role_name
+
         result = subprocess.run(
-            ["npm", "run", "molecule:role", f"--role={role_name}"],
+            ["uv", "run", "molecule", "test"],
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=worktree_path,
+            cwd=str(molecule_cwd),
             env=env,
         )
 
@@ -311,10 +450,14 @@ async def run_molecule_node(state: BoxUpRoleState) -> dict:
                 execution_id=execution_id,
             )
             # Note: errors are tracked but don't prevent pytest from running in parallel mode
+            # Capture both stdout and stderr for MR description
             return {
                 "molecule_passed": False,
                 "molecule_duration": duration,
-                "molecule_output": result.stdout[-5000:],
+                "molecule_output": error_msg,  # Prioritize error output for failed tests
+                "molecule_stdout": result.stdout[-2000:] if result.stdout else "",
+                "molecule_stderr": result.stderr[-2000:] if result.stderr else "",
+                "deploy_target": "vmnode852",  # Default test target
                 "parallel_tests_completed": ["run_molecule"],
                 "completed_nodes": ["run_molecule_tests"],
             }
@@ -326,6 +469,8 @@ async def run_molecule_node(state: BoxUpRoleState) -> dict:
         return {
             "molecule_passed": True,
             "molecule_duration": duration,
+            "molecule_output": result.stdout[-2000:] if result.stdout else "",
+            "deploy_target": "vmnode852",  # Default test target
             "parallel_tests_completed": ["run_molecule"],
             "completed_nodes": ["run_molecule_tests"],
         }
@@ -518,32 +663,111 @@ async def merge_test_results_node(state: BoxUpRoleState) -> dict:
 
 
 async def validate_deploy_node(state: BoxUpRoleState) -> dict:
-    """Validate deployment configuration."""
-    # This node validates deployment readiness without actually deploying
-    # Checks: syntax validation, variable completeness, etc.
+    """
+    Validate deployment configuration with self-correction for path issues.
+
+    This node validates deployment readiness without actually deploying.
+    Checks: syntax validation, variable completeness, etc.
+
+    Self-correction: If site.yml is not found at worktree root, automatically
+    checks ansible/ subdirectory (standard repo layout).
+    """
+    from harness.dag.error_resolution import (
+        ErrorType,
+        attempt_resolution,
+        classify_error,
+        create_recovery_state_update,
+        should_attempt_recovery,
+    )
 
     role_name = state["role_name"]
     worktree_path = state.get("worktree_path", ".")
 
+    # Check if resolution provided an alternative cwd
+    ansible_cwd = state.get("ansible_cwd")
+
+    # Determine correct working directory for ansible-playbook
+    # Standard repo layout has site.yml in ansible/ subdirectory
+    if ansible_cwd:
+        # Use explicitly provided path from recovery
+        site_yml_cwd = ansible_cwd
+    else:
+        # Auto-detect: try ansible/ subdirectory first, then worktree root
+        possible_cwds = [
+            Path(worktree_path) / "ansible",
+            Path(worktree_path),
+        ]
+
+        site_yml_cwd = None
+        for cwd in possible_cwds:
+            if (cwd / "site.yml").exists():
+                site_yml_cwd = str(cwd)
+                break
+
+    if site_yml_cwd is None:
+        # No site.yml found anywhere - skip validation (not an error)
+        return {
+            "deploy_skipped": True,
+            "completed_nodes": ["validate_deploy"],
+        }
+
     try:
-        # Run ansible-playbook --syntax-check
         result = subprocess.run(
             ["ansible-playbook", "--syntax-check", "site.yml", "-e", f"target_role={role_name}"],
             capture_output=True,
             text=True,
             timeout=60,
-            cwd=worktree_path,
+            cwd=site_yml_cwd,
         )
 
         if result.returncode != 0:
+            error_msg = result.stderr or result.stdout
+            error = classify_error(f"Syntax check failed: {error_msg}", "validate_deploy", state)
+
+            if error.error_type == ErrorType.RECOVERABLE:
+                # Check if we should attempt recovery
+                if should_attempt_recovery(state, "validate_deploy"):
+                    resolution = attempt_resolution(error.resolution_hint, error.context, state)
+                    if resolution:
+                        # Return recovery state to trigger retry
+                        update = create_recovery_state_update("validate_deploy", error, resolution)
+                        return update
+
+                # v0.6.0: For recoverable errors beyond inline fix,
+                # set last_error_* but NOT errors — let recovery subgraph handle it
+                return {
+                    "last_error_type": error.error_type.value,
+                    "last_error_message": f"Syntax check failed: {error_msg}",
+                    "last_error_node": "validate_deploy",
+                    "recovery_context": error.context,
+                    "completed_nodes": ["validate_deploy"],
+                }
+
+            if error.error_type == ErrorType.USER_FIXABLE:
+                # v0.6.0: USER_FIXABLE errors go to recovery only if node
+                # supports tier 3 (agent can edit code). Otherwise fall through
+                # to the standard error path.
+                from harness.dag.recovery_config import get_max_tier
+
+                if get_max_tier("validate_deploy") >= 3:
+                    return {
+                        "last_error_type": error.error_type.value,
+                        "last_error_message": f"Syntax check failed: {error_msg}",
+                        "last_error_node": "validate_deploy",
+                        "recovery_context": error.context,
+                        "completed_nodes": ["validate_deploy"],
+                    }
+
             return {
                 "deploy_passed": False,
-                "errors": [f"Syntax check failed: {result.stderr}"],
+                "errors": [f"Syntax check failed: {error_msg}"],
+                "last_error_type": error.error_type.value,
                 "completed_nodes": ["validate_deploy"],
             }
 
         return {
             "deploy_passed": True,
+            "ansible_cwd": None,  # Clear recovery flag on success
             "completed_nodes": ["validate_deploy"],
         }
 
@@ -551,10 +775,11 @@ async def validate_deploy_node(state: BoxUpRoleState) -> dict:
         return {
             "deploy_passed": False,
             "errors": ["Deploy validation timed out"],
+            "last_error_type": "transient",
             "completed_nodes": ["validate_deploy"],
         }
     except FileNotFoundError:
-        # No site.yml - skip validation
+        # No ansible-playbook command - skip validation
         return {
             "deploy_skipped": True,
             "completed_nodes": ["validate_deploy"],
@@ -666,37 +891,39 @@ async def push_branch_node(state: BoxUpRoleState) -> dict:
 
 async def create_issue_node(state: BoxUpRoleState) -> dict:
     """
-    Create GitLab issue with iteration assignment using GitLabClient.
+    Create GitLab issue with iteration assignment using async GitLabAPI.
 
-    Uses get_or_create_issue() for idempotency - if an issue already exists
-    for this role, it will be reused instead of creating a duplicate.
+    Uses get_or_create_issue() with EXACT title matching for idempotency -
+    if an issue already exists for this role, it will be reused instead
+    of creating a duplicate.
+
+    The issue title format is CONSISTENT:
+        feat({role_name}): Box up `{role_name}` Ansible role
+
+    This exact title is used for both search AND creation to ensure
+    idempotency across multiple runs.
     """
     role_name = state["role_name"]
     wave = state.get("wave", 0)
     wave_name = state.get("wave_name", "")
-    db = get_module_db()
-
-    if db is None:
-        return {
-            "errors": ["Database not available for issue creation"],
-            "completed_nodes": ["create_gitlab_issue"],
-        }
 
     try:
-        from harness.gitlab.api import GitLabClient, GitLabConfig as ApiGitLabConfig
+        from harness.gitlab.http_client import GitLabAPI, GitLabAPIConfig
 
         # Use config from harness.yml if available
         harness_config = get_module_config()
-        api_config = None
+        worktree_path = state.get("worktree_path", ".")
+        config = GitLabAPIConfig.from_harness_yml(Path(worktree_path))
+
+        # Override with harness config if available
         if harness_config and hasattr(harness_config, "gitlab"):
             gl = harness_config.gitlab
-            api_config = ApiGitLabConfig(
-                project_path=gl.project_path,
-                group_path=gl.group_path,
-                default_assignee=gl.default_assignee,
-                default_labels=gl.default_labels,
-            )
-        client = GitLabClient(db, config=api_config)
+            config.project_path = gl.project_path
+            config.default_assignee = gl.default_assignee
+            config.default_labels = gl.default_labels
+
+        # CONSISTENT title for both search and creation - critical for idempotency
+        issue_title = f"feat({role_name}): Box up `{role_name}` Ansible role"
 
         # Build issue description
         description = f"""## Box up `{role_name}` Ansible role
@@ -716,68 +943,71 @@ Wave {wave}: {wave_name}
 {chr(10).join("- " + cred.get("entry_name", "unknown") for cred in state.get("credentials", [])) or "None required"}
 """
 
-        # Get current iteration
-        iteration = client.get_current_iteration()
-        iteration_id = iteration.id if iteration else None
+        async with GitLabAPI(config) as api:
+            # Get current iteration from group
+            group_path = "tinyland"  # Default group path
+            if harness_config and hasattr(harness_config, "gitlab"):
+                group_path = getattr(harness_config.gitlab, "group_path", "tinyland")
 
-        # Prepare labels for the role - this ensures all labels exist with proper colors
-        # before creating the issue, avoiding label creation failures
-        labels = client.prepare_labels_for_role(role_name, wave)
+            iteration = await api.get_current_iteration(group_path)
+            iteration_id = iteration.get("id") if iteration else None
 
-        # Use get_or_create_issue for idempotency - avoids duplicate issues
-        issue, created = client.get_or_create_issue(
-            role_name=role_name,
-            title=f"feat({role_name}): Box up `{role_name}` Ansible role",
-            description=description,
-            labels=labels,
-            iteration_id=iteration_id,
-            weight=2,
-        )
+            if iteration_id:
+                logger.info(f"Assigning to iteration: {iteration.get('title')}")
 
-        return {
-            "issue_url": issue.web_url,
-            "issue_iid": issue.iid,
-            "issue_created": created,
-            "iteration_assigned": iteration_id is not None,
-            "completed_nodes": ["create_gitlab_issue"],
-        }
+            # Prepare labels
+            labels = config.default_labels.copy() if config.default_labels else ["role", "ansible", "molecule"]
+            wave_label = f"wave-{wave}"
+            if wave_label not in labels:
+                labels.append(wave_label)
 
-    except ValueError as e:
-        return {
-            "errors": [str(e)],
-            "completed_nodes": ["create_gitlab_issue"],
-        }
-    except RuntimeError as e:
+            # Ensure labels exist
+            for label in labels:
+                await api.ensure_label_exists(label)
+
+            # Use get_or_create_issue with EXACT title matching for idempotency
+            # Also pass role_name for fallback search
+            issue, created = await api.get_or_create_issue(
+                title=issue_title,  # EXACT title for both search and create
+                description=description,
+                labels=labels,
+                assignee_username=config.default_assignee,
+                iteration_id=iteration_id,
+                role_name=role_name,  # For fallback search
+            )
+
+            return {
+                "issue_url": issue.get("web_url"),
+                "issue_iid": issue.get("iid"),
+                "issue_created": created,
+                "iteration_assigned": iteration_id is not None,
+                "completed_nodes": ["create_gitlab_issue"],
+            }
+
+    except Exception as e:
+        logger.error(f"Issue creation failed: {e}")
         return {
             "errors": [f"Issue creation failed: {e}"],
-            "completed_nodes": ["create_gitlab_issue"],
-        }
-    except Exception as e:
-        return {
-            "errors": [str(e)],
             "completed_nodes": ["create_gitlab_issue"],
         }
 
 
 async def create_mr_node(state: BoxUpRoleState) -> dict:
     """
-    Create GitLab merge request using GitLabClient.
+    Create GitLab merge request using async GitLabAPI.
 
     Uses get_or_create_mr() for idempotency - if an MR already exists
     for this branch, it will be reused instead of creating a duplicate.
+
+    Renders the MR description using the bundled template with test evidence
+    including molecule test results, duration, and error output if failed.
     """
     role_name = state["role_name"]
     issue_iid = state.get("issue_iid")
     branch = state.get("branch", f"sid/{role_name}")
     wave = state.get("wave", 0)
     wave_name = state.get("wave_name", "")
-    db = get_module_db()
-
-    if db is None:
-        return {
-            "errors": ["Database not available for MR creation"],
-            "completed_nodes": ["create_merge_request"],
-        }
+    worktree_path = state.get("worktree_path", ".")
 
     if not issue_iid:
         return {
@@ -786,85 +1016,96 @@ async def create_mr_node(state: BoxUpRoleState) -> dict:
         }
 
     try:
-        from harness.gitlab.api import GitLabClient, GitLabConfig as ApiGitLabConfig
+        from harness.gitlab.http_client import GitLabAPI, GitLabAPIConfig
+        from harness.gitlab.templates import render_mr_description
 
         # Use config from harness.yml if available
         harness_config = get_module_config()
-        api_config = None
+        config = GitLabAPIConfig.from_harness_yml(Path(worktree_path))
+
+        # Override with harness config if available
         if harness_config and hasattr(harness_config, "gitlab"):
             gl = harness_config.gitlab
-            api_config = ApiGitLabConfig(
-                project_path=gl.project_path,
-                group_path=gl.group_path,
-                default_assignee=gl.default_assignee,
-                default_labels=gl.default_labels,
+            config.project_path = gl.project_path
+            config.default_assignee = gl.default_assignee
+            config.default_labels = gl.default_labels
+
+        # Build template context with test evidence
+        template_ctx = {
+            "role_name": role_name,
+            "issue_iid": issue_iid,
+            "wave": wave,
+            "wave_name": wave_name,
+            "is_new_role": state.get("is_new_role", True),
+            "role_diff_stat": state.get("role_diff_stat"),
+            "molecule_passed": state.get("molecule_passed", False),
+            "molecule_duration": state.get("molecule_duration", 0),
+            "molecule_stderr": state.get("molecule_output", ""),  # Use output for errors
+            "molecule_skipped": state.get("molecule_skipped", False),
+            "deploy_target": state.get("deploy_target", "vmnode852"),
+            "tags": state.get("tags", [role_name]),
+            "credentials": state.get("credentials", []),
+            "explicit_deps": state.get("explicit_deps", []),
+            "reverse_deps": state.get("reverse_deps", []),
+            "assignee": config.default_assignee,
+        }
+
+        # Render MR description with test evidence using bundled template
+        description = render_mr_description(template_ctx)
+
+        # MR title - consistent format
+        mr_title = f"feat({role_name}): Box up `{role_name}` Ansible role"
+
+        async with GitLabAPI(config) as api:
+            # Check for existing MR first
+            existing_mr = await api.find_mr_by_branch(branch, state="opened")
+            if existing_mr:
+                logger.info(f"Found existing opened MR: {existing_mr.get('web_url')}")
+                return {
+                    "mr_url": existing_mr.get("web_url"),
+                    "mr_iid": existing_mr.get("iid"),
+                    "mr_created": False,
+                    "completed_nodes": ["create_merge_request"],
+                }
+
+            # Check for merged MR (already done)
+            merged_mr = await api.find_mr_by_branch(branch, state="merged")
+            if merged_mr:
+                logger.info(f"Found merged MR: {merged_mr.get('web_url')}")
+                return {
+                    "mr_url": merged_mr.get("web_url"),
+                    "mr_iid": merged_mr.get("iid"),
+                    "mr_created": False,
+                    "completed_nodes": ["create_merge_request"],
+                }
+
+            # Prepare labels
+            labels = config.default_labels.copy() if config.default_labels else ["role", "ansible", "molecule"]
+            wave_label = f"wave-{wave}"
+            if wave_label not in labels:
+                labels.append(wave_label)
+
+            # Create new MR with rendered description containing test evidence
+            mr, created = await api.get_or_create_mr(
+                source_branch=branch,
+                target_branch="main",
+                title=mr_title,
+                description=description,
+                labels=labels,
+                assignee_username=config.default_assignee,
             )
-        client = GitLabClient(db, config=api_config)
 
-        # Build MR description
-        description = f"""## Summary
+            return {
+                "mr_url": mr.get("web_url"),
+                "mr_iid": mr.get("iid"),
+                "mr_created": created,
+                "completed_nodes": ["create_merge_request"],
+            }
 
-Box up the `{role_name}` Ansible role with molecule tests.
-
-Wave {wave}: {wave_name}
-
-Closes #{issue_iid}
-
-## Test Plan
-
-- [ ] Molecule converge passes
-- [ ] Molecule verify passes
-- [ ] Molecule idempotence passes
-- [ ] CI pipeline passes
-
-## Checklist
-
-- [x] Code follows project conventions
-- [x] Tests added/updated
-- [ ] Documentation updated (if needed)
-"""
-
-        # Use get_or_create_mr for idempotency - avoids duplicate MRs
-        mr, created = client.get_or_create_mr(
-            role_name=role_name,
-            source_branch=branch,
-            title=f"feat({role_name}): Add `{role_name}` Ansible role",
-            description=description,
-            issue_iid=issue_iid,
-            draft=False,
-        )
-
-        # Set reviewers from config if available
-        reviewers_set = False
-        if client.config.default_reviewers:
-            reviewers_set = client.set_mr_reviewers(mr.iid, client.config.default_reviewers)
-            if not reviewers_set:
-                # Log but don't fail - reviewers are optional
-                logger.warning(
-                    f"Failed to set reviewers for MR !{mr.iid}: {client.config.default_reviewers}"
-                )
-
-        return {
-            "mr_url": mr.web_url,
-            "mr_iid": mr.iid,
-            "mr_created": created,
-            "reviewers_set": reviewers_set,
-            "completed_nodes": ["create_merge_request"],
-        }
-
-    except ValueError as e:
-        return {
-            "errors": [str(e)],
-            "completed_nodes": ["create_merge_request"],
-        }
-    except RuntimeError as e:
+    except Exception as e:
+        logger.error(f"MR creation failed: {e}")
         return {
             "errors": [f"MR creation failed: {e}"],
-            "completed_nodes": ["create_merge_request"],
-        }
-    except Exception as e:
-        return {
-            "errors": [str(e)],
             "completed_nodes": ["create_merge_request"],
         }
 

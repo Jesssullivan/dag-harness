@@ -111,6 +111,7 @@ def _record_test_result(
     passed: bool,
     error_message: str | None = None,
     execution_id: int | None = None,
+    test_run_id: int | None = None,
 ) -> None:
     """Record a test result in the database for regression tracking.
 
@@ -120,22 +121,33 @@ def _record_test_result(
         test_type: Type of test (MOLECULE, PYTEST, etc.)
         passed: Whether the test passed
         error_message: Error message if test failed
-        execution_id: Workflow execution ID (used as test_run_id for tracking)
+        execution_id: Workflow execution ID (for reference, not used for FK)
+        test_run_id: Actual test_runs.id for FK constraint (optional)
+
+    Note:
+        The test_run_id must reference an existing test_runs.id if provided.
+        If test_run_id is None, the regression will be recorded without linking
+        to a specific test run (first_failure_run_id will be NULL).
     """
     db = get_module_db()
     if db is None:
         return  # Silently skip if no db available (e.g., in testing)
 
-    # Skip recording if no execution_id (required for test run tracking)
-    if execution_id is None:
-        return
+    # Use test_run_id if provided, otherwise don't link to a test run
+    # IMPORTANT: Do NOT use execution_id as test_run_id - they reference different tables!
+    # execution_id is workflow_executions.id, test_run_id is test_runs.id
+    run_id = test_run_id
 
     if passed:
-        db.record_test_success(role_name, test_name, test_type, execution_id)
+        if run_id is not None:
+            db.record_test_success(role_name, test_name, test_type, run_id)
+        # If no run_id, we can't record success (it clears regressions based on run_id)
     else:
-        db.record_test_failure(
-            role_name, test_name, test_type, execution_id, error_message=error_message
-        )
+        if run_id is not None:
+            db.record_test_failure(
+                role_name, test_name, test_type, run_id, error_message=error_message
+            )
+        # If no run_id, skip recording failure (can't satisfy FK constraint)
 
 
 # ============================================================================
@@ -161,6 +173,8 @@ class BoxUpRoleState(TypedDict, total=False):
     has_meta: bool
     wave: int
     wave_name: str
+    is_new_role: bool  # True if role doesn't exist on origin/main, False if existing
+    role_diff_stat: str | None  # Git diff stat for existing roles with changes
 
     # Dependency analysis - use reducers to accumulate across analysis passes
     explicit_deps: Annotated[list[str], operator.add]
@@ -182,11 +196,14 @@ class BoxUpRoleState(TypedDict, total=False):
     molecule_skipped: bool
     molecule_duration: int | None
     molecule_output: str | None
+    molecule_stdout: str | None  # Stdout from molecule test run
+    molecule_stderr: str | None  # Stderr from molecule test run (for MR description)
     pytest_passed: bool | None
     pytest_skipped: bool
     pytest_duration: int | None
     deploy_passed: bool | None
     deploy_skipped: bool
+    deploy_target: str | None  # Target VM for deployment (e.g., "vmnode852")
 
     # Parallel test execution state (Task #21)
     all_tests_passed: bool | None
@@ -230,6 +247,33 @@ class BoxUpRoleState(TypedDict, total=False):
     human_rejection_reason: str | None
     awaiting_human_input: bool
 
+    # Error Resolution (v0.5.0 - Self-correction loops)
+    # These fields track recovery attempts for recoverable errors
+    recovery_context: dict | None  # Context about what failed and why
+    recovery_attempts: Annotated[list[dict], operator.add]  # History of recovery attempts
+    max_recovery_attempts: int  # Default 2, configurable per-node (v0.5.0 compat)
+    current_resolution_strategy: str | None  # What fix is being attempted
+
+    # Resolution metadata
+    last_error_type: str | None  # "recoverable" | "transient" | "user_fixable" | "unexpected"
+    last_error_message: str | None
+    last_error_node: str | None
+
+    # Recovery flags (signal nodes to retry with different approach)
+    worktree_force_recreate: bool  # Force remove and recreate worktree
+    branch_force_recreate: bool  # Force delete and recreate branch
+    ansible_cwd: str | None  # Override working directory for ansible commands
+
+    # Agentic Recovery (v0.6.0 - Recovery subgraph)
+    recovery_budget: int  # Total iterations remaining (from RecoveryConfig)
+    recovery_iteration: int  # Current iteration number within recovery subgraph
+    recovery_tier: int  # Current recovery tier (0-4)
+    recovery_session_id: str | None  # Claude SDK agent session ID (tier 3)
+    recovery_plan: str | None  # Current recovery plan (natural language)
+    recovery_memory_ns: str | None  # HarnessStore namespace for this recovery
+    recovery_result: str | None  # "resolved" | "escalate" | "continue" | None
+    recovery_actions: Annotated[list[dict], operator.add]  # Actions taken during recovery
+
 
 def create_initial_state(role_name: str, execution_id: int | None = None) -> BoxUpRoleState:
     """Create initial state for a workflow execution."""
@@ -240,6 +284,8 @@ def create_initial_state(role_name: str, execution_id: int | None = None) -> Box
         has_meta=False,
         wave=0,
         wave_name="",
+        is_new_role=True,  # Assume new until validate_role_node checks
+        role_diff_stat=None,
         explicit_deps=[],
         implicit_deps=[],
         reverse_deps=[],
@@ -250,6 +296,7 @@ def create_initial_state(role_name: str, execution_id: int | None = None) -> Box
         molecule_skipped=False,
         pytest_skipped=False,
         deploy_skipped=False,
+        deploy_target=None,
         all_tests_passed=None,
         parallel_tests_completed=[],
         test_phase_start_time=None,
@@ -266,6 +313,26 @@ def create_initial_state(role_name: str, execution_id: int | None = None) -> Box
         human_approved=None,
         human_rejection_reason=None,
         awaiting_human_input=False,
+        # Error resolution defaults
+        recovery_context=None,
+        recovery_attempts=[],
+        max_recovery_attempts=2,
+        current_resolution_strategy=None,
+        last_error_type=None,
+        last_error_message=None,
+        last_error_node=None,
+        worktree_force_recreate=False,
+        branch_force_recreate=False,
+        ansible_cwd=None,
+        # Agentic recovery defaults (v0.6.0)
+        recovery_budget=0,
+        recovery_iteration=0,
+        recovery_tier=0,
+        recovery_session_id=None,
+        recovery_plan=None,
+        recovery_memory_ns=None,
+        recovery_result=None,
+        recovery_actions=[],
     )
 
 

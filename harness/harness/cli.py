@@ -24,7 +24,8 @@ from rich.tree import Tree
 
 from harness import __version__
 from harness.config import HarnessConfig
-from harness.dag.graph import create_box_up_role_graph
+from harness.dag.langgraph_builder import create_box_up_role_graph
+from harness.dag.langgraph_runner import LangGraphWorkflowRunner
 from harness.db.state import StateDB
 from harness.gitlab.api import GitLabClient
 
@@ -82,49 +83,39 @@ def box_up_role(
     if dry_run:
         console.print(f"[yellow]DRY RUN:[/yellow] Would execute box-up-role for '{role_name}'")
         console.print("\nWorkflow nodes:")
-        graph = create_box_up_role_graph(db)
-        for name, node_def in graph.nodes.items():
-            console.print(f"  - {name}: {node_def.node.description}")
+        # Show workflow nodes from LangGraph builder
+        graph, _ = create_box_up_role_graph(config.db_path)
+        for node_name in graph.nodes:
+            if node_name not in ("__start__", "__end__"):
+                console.print(f"  - {node_name}: {_get_node_description(node_name)}")
         return
 
     console.print(f"[blue]Starting box-up-role workflow for:[/blue] {role_name}")
 
-    # Parse breakpoints
-    bp_set = set(breakpoints.split(",")) if breakpoints else None
+    # Execute workflow using LangGraphWorkflowRunner
+    runner = LangGraphWorkflowRunner(db=db, db_path=config.db_path)
 
-    # Execute workflow
-    graph = create_box_up_role_graph(db)
+    async def run_workflow():
+        """Run workflow with progress via runner."""
+        # Use runner's execute method which handles DB operations correctly
+        result = await runner.execute(role_name)
 
-    # Add event handler for progress output
-    def event_handler(event):
-        if event.event_type == "node_started":
-            console.print(f"  [blue]→[/blue] {event.node_name}")
-        elif event.event_type == "node_completed":
-            console.print(f"  [green]✓[/green] {event.node_name}")
-        elif event.event_type == "node_failed":
-            console.print(f"  [red]✗[/red] {event.node_name}: {event.data.get('error')}")
-        elif event.event_type == "node_skipped":
-            console.print(f"  [yellow]○[/yellow] {event.node_name} (skipped)")
+        # Print progress based on completed nodes
+        state = result.get("state", {})
+        for node in state.get("completed_nodes", []):
+            console.print(f"  [green]✓[/green] {node}")
 
-    graph.add_event_handler(event_handler)
+        return result
 
-    result = asyncio.run(
-        graph.execute(
-            role_name,
-            breakpoints=bp_set,
-            repo_root=repo_root,
-            repo_python=config.repo_python,
-        )
-    )
+    result = asyncio.run(run_workflow())
 
     # Output result
     if result["status"] == "completed":
         console.print("\n[green]Workflow completed successfully![/green]")
-        summary = result.get("summary", {})
-        if summary:
-            console.print(f"\n  Issue URL: {summary.get('issue_url', 'N/A')}")
-            console.print(f"  MR URL: {summary.get('mr_url', 'N/A')}")
-            console.print(f"  Worktree: {summary.get('worktree_path', 'N/A')}")
+        state = result.get("state", {})
+        console.print(f"\n  Issue URL: {state.get('issue_url', 'N/A')}")
+        console.print(f"  MR URL: {state.get('mr_url', 'N/A')}")
+        console.print(f"  Worktree: {state.get('worktree_path', 'N/A')}")
     elif result["status"] == "paused":
         console.print(f"\n[yellow]Workflow paused at:[/yellow] {result.get('paused_at')}")
         console.print(f"Resume with: harness resume {result['execution_id']}")
@@ -135,6 +126,29 @@ def box_up_role(
         console.print(f"\n[red]Workflow failed:[/red] {result.get('error')}")
         console.print(f"Failed at node: {result.get('failed_at')}")
         raise typer.Exit(1)
+
+
+def _get_node_description(node_name: str) -> str:
+    """Get description for a node name."""
+    descriptions = {
+        "validate_role": "Validate role exists and extract metadata",
+        "analyze_dependencies": "Analyze role dependencies and credentials",
+        "check_dependencies": "Verify upstream dependencies are boxed up first",
+        "warn_reverse_deps": "Note downstream roles that may need updates",
+        "create_worktree": "Create isolated git worktree",
+        "run_molecule_tests": "Execute molecule tests (blocking)",
+        "run_pytest_tests": "Execute pytest tests",
+        "validate_deploy": "Validate deployment target",
+        "create_commit": "Create signed commit",
+        "push_branch": "Push branch to origin with tracking",
+        "create_gitlab_issue": "Create GitLab issue",
+        "create_merge_request": "Create GitLab merge request",
+        "human_approval": "Wait for human approval",
+        "add_to_merge_train": "Add MR to merge train",
+        "report_summary": "Generate workflow summary",
+        "notify_failure": "Send failure notification",
+    }
+    return descriptions.get(node_name, node_name)
 
 
 @app.command("status")

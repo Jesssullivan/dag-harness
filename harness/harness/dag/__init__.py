@@ -61,6 +61,36 @@ from harness.dag.checkpointer import (
     migrate_sqlite_to_postgres,
 )
 
+# Error resolution for self-correction loops (v0.5.0)
+from harness.dag.error_resolution import (
+    ClassifiedError,
+    ErrorType,
+    attempt_resolution,
+    classify_error,
+    create_recovery_state_update,
+    get_recovery_attempt_count,
+    lookup_recovery_memory,
+    persist_recovery_memory,
+    select_recovery_tier,
+    should_attempt_recovery,
+    should_attempt_recovery_v2,
+)
+
+# Recovery configuration and subgraph (v0.6.0)
+from harness.dag.recovery_config import (
+    DEFAULT_RECOVERY_CONFIG,
+    NODE_RECOVERY_CONFIGS,
+    RecoveryConfig,
+    get_max_iterations,
+    get_max_tier,
+    get_recovery_config,
+)
+from harness.dag.recovery_subgraph import (
+    RecoveryState,
+    create_recovery_subgraph,
+    escalate_to_human,
+)
+
 # LangGraph implementation (recommended)
 from harness.dag.langgraph_engine import (
     BoxUpRoleState,
@@ -142,6 +172,30 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    # Error resolution (v0.5.0)
+    "ErrorType",
+    "ClassifiedError",
+    "classify_error",
+    "attempt_resolution",
+    "get_recovery_attempt_count",
+    "should_attempt_recovery",
+    "create_recovery_state_update",
+    # Error resolution (v0.6.0)
+    "select_recovery_tier",
+    "should_attempt_recovery_v2",
+    "lookup_recovery_memory",
+    "persist_recovery_memory",
+    # Recovery configuration (v0.6.0)
+    "RecoveryConfig",
+    "NODE_RECOVERY_CONFIGS",
+    "DEFAULT_RECOVERY_CONFIG",
+    "get_recovery_config",
+    "get_max_iterations",
+    "get_max_tier",
+    # Recovery subgraph (v0.6.0)
+    "RecoveryState",
+    "create_recovery_subgraph",
+    "escalate_to_human",
     # LangGraph implementation (recommended)
     "BoxUpRoleState",
     "LangGraphWorkflowRunner",

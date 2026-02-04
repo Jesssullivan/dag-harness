@@ -123,7 +123,8 @@ class WorktreeManager:
             WorktreeInfo for the created worktree
         """
         branch = f"sid/{role_name}"
-        worktree_path = str(Path(self.config.worktree.base_path) / f"sid-{role_name}")
+        # Resolve to absolute path to avoid issues with relative paths during workflow execution
+        worktree_path = str((Path(self.config.worktree.base_path) / f"sid-{role_name}").resolve())
 
         # Check if already exists
         if Path(worktree_path).exists():
@@ -195,7 +196,8 @@ class WorktreeManager:
         Returns:
             True if removed successfully
         """
-        worktree_path = str(Path(self.config.worktree.base_path) / f"sid-{role_name}")
+        # Resolve to absolute path for consistency
+        worktree_path = str((Path(self.config.worktree.base_path) / f"sid-{role_name}").resolve())
 
         args = ["worktree", "remove", worktree_path]
         if force:

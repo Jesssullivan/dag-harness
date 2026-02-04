@@ -198,6 +198,96 @@ class GitLabAPI:
         )
         return issues[0] if issues else None
 
+    async def find_issue_by_exact_title(
+        self, title: str, state: str = "all"
+    ) -> dict[str, Any] | None:
+        """
+        Find issue by EXACT title match.
+
+        GitLab's search API is fuzzy. This method fetches candidates
+        and filters for exact title match locally.
+
+        Args:
+            title: Exact issue title to find
+            state: Issue state filter ('opened', 'closed', 'all')
+
+        Returns:
+            Issue dict if exact match found, None otherwise
+        """
+        import re
+
+        # Extract a unique search term from the title
+        # For "feat(common): Box up `common` Ansible role" -> use "common"
+        role_match = re.search(r"`(\w+)`", title)
+        if not role_match:
+            # Fallback to first significant word search
+            search_term = title.split()[0] if title else ""
+        else:
+            search_term = role_match.group(1)
+
+        # Fetch candidates using fuzzy search
+        issues = await self._get(
+            f"/projects/{self.config.project_encoded}/issues",
+            params={"search": search_term, "state": state, "in": "title", "per_page": 100},
+        )
+
+        if not issues:
+            return None
+
+        # Filter for EXACT title match
+        for issue in issues:
+            if issue.get("title") == title:
+                logger.info(f"Found exact match: #{issue.get('iid')} - {title}")
+                return issue
+
+        logger.debug(f"No exact title match found for: {title}")
+        return None
+
+    async def find_issue_for_role(
+        self, role_name: str, state: str = "all"
+    ) -> dict[str, Any] | None:
+        """
+        Find issue for a role by searching for `role_name` in title.
+
+        This method handles the case where we need to find any issue
+        for a role, regardless of exact title format.
+
+        Args:
+            role_name: Name of the role to find issue for
+            state: Issue state filter ('opened', 'closed', 'all')
+
+        Returns:
+            Issue dict if found (oldest by IID), None otherwise
+        """
+        # Fetch candidates using role name as search term
+        issues = await self._get(
+            f"/projects/{self.config.project_encoded}/issues",
+            params={"search": role_name, "state": state, "in": "title", "per_page": 100},
+        )
+
+        if not issues:
+            return None
+
+        # Filter for issues that have the role name in backticks and "box up" in title
+        matching_issues = []
+        for issue in issues:
+            title = issue.get("title", "").lower()
+            # Match patterns like "Box up `role_name`" or "feat(role_name): Box up `role_name`"
+            if f"`{role_name}`" in issue.get("title", "") and "box up" in title:
+                matching_issues.append(issue)
+
+        if not matching_issues:
+            logger.debug(f"No issues found for role '{role_name}'")
+            return None
+
+        # Return the oldest (lowest IID) as canonical to ensure consistency
+        canonical = min(matching_issues, key=lambda i: i.get("iid", float("inf")))
+        logger.info(
+            f"Found canonical issue for '{role_name}': #{canonical.get('iid')} "
+            f"(of {len(matching_issues)} matching issues)"
+        )
+        return canonical
+
     async def create_issue(
         self,
         title: str,
@@ -246,31 +336,42 @@ class GitLabAPI:
 
     async def get_or_create_issue(
         self,
-        search: str,
         title: str,
         description: str,
         labels: list[str] | None = None,
         assignee_username: str | None = None,
         iteration_id: int | None = None,
+        role_name: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """
-        Idempotent issue creation. Returns (issue, created).
+        Idempotent issue creation using EXACT title matching. Returns (issue, created).
 
         Args:
-            search: Search term to find existing issue
-            title: Issue title for creation
+            title: Issue title for both search AND creation (must be exact)
             description: Issue description for creation
             labels: Labels to apply
             assignee_username: Username to assign
             iteration_id: Iteration to assign
+            role_name: Optional role name for fallback search
 
         Returns:
             Tuple of (issue_dict, created_bool)
         """
-        existing = await self.find_issue(search, state="all")
+        # First: Try exact title match
+        existing = await self.find_issue_by_exact_title(title, state="all")
         if existing:
-            logger.info(f"Found existing issue: {existing.get('web_url')}")
+            logger.info(f"Found existing issue by exact title: {existing.get('web_url')}")
             return existing, False
+
+        # Second: If role_name provided, search for any issue for this role
+        # This catches issues with slightly different title formats
+        if role_name:
+            role_issue = await self.find_issue_for_role(role_name, state="all")
+            if role_issue:
+                logger.info(
+                    f"Found existing issue for role '{role_name}': {role_issue.get('web_url')}"
+                )
+                return role_issue, False
 
         # Use default assignee if not specified
         if not assignee_username and self.config.default_assignee:

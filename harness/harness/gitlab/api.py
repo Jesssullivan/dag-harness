@@ -1446,64 +1446,80 @@ Please investigate the error and resolve the blocking issue before continuing.
     # IDEMPOTENCY OPERATIONS
     # =========================================================================
 
-    def find_existing_issue(self, role_name: str, state: str = "opened") -> Issue | None:
+    def find_existing_issue(self, role_name: str, state: str = "all") -> Issue | None:
         """
         Find existing issue for a role by searching title pattern 'Box up `{role_name}`'.
 
         This enables idempotent issue creation - if an issue already exists for
         the role, we can reuse it instead of creating a duplicate.
 
+        IMPORTANT: Returns the OLDEST (lowest IID) matching issue to ensure
+        consistency when duplicates exist. Default state is 'all' to find
+        issues in any state.
+
         Args:
             role_name: Name of the role to find issue for
             state: Issue state filter ('opened', 'closed', 'all')
 
         Returns:
-            Existing Issue if found, None otherwise
+            Existing Issue if found (oldest by IID), None otherwise
         """
-        # Search for issues with title pattern
-        # URL encode the search term for the API request
-        search_term = urllib.parse.quote(f"Box up `{role_name}`")
+        # Search for issues with role name - more reliable than full title search
+        search_term = urllib.parse.quote(role_name)
 
         try:
             issues = self._api_get(
                 f"projects/{self.config.project_path_encoded}/issues"
-                f"?state={state}&search={search_term}&in=title"
+                f"?state={state}&search={search_term}&in=title&per_page=100"
             )
 
             if not issues:
                 return None
 
-            # Filter to exact match (search is fuzzy, we need exact)
+            # Filter for issues that have the role name in backticks and "box up" in title
+            matching_issues = []
             for issue_data in issues:
                 title = issue_data.get("title", "")
                 # Match patterns like "Box up `role_name`" or "feat(role_name): Box up `role_name`"
                 if f"`{role_name}`" in title and "box up" in title.lower():
-                    # Get role_id if available
-                    role = self.db.get_role(role_name)
-                    role_id = role.id if role else None
+                    matching_issues.append(issue_data)
 
-                    issue = Issue(
-                        id=issue_data["id"],
-                        iid=issue_data["iid"],
-                        role_id=role_id,
-                        iteration_id=issue_data.get("iteration", {}).get("id")
-                        if issue_data.get("iteration")
-                        else None,
-                        title=issue_data["title"],
-                        state=issue_data["state"],
-                        web_url=issue_data["web_url"],
-                        labels=json.dumps(issue_data.get("labels", [])),
-                        assignee=issue_data.get("assignees", [{}])[0].get("username")
-                        if issue_data.get("assignees")
-                        else None,
-                        weight=issue_data.get("weight"),
-                    )
+            if not matching_issues:
+                return None
 
-                    # Update local database
-                    self.db.upsert_issue(issue)
-                    return issue
+            # Return the OLDEST (lowest IID) as canonical to ensure consistency
+            canonical_data = min(matching_issues, key=lambda i: i.get("iid", float("inf")))
 
-            return None
+            if len(matching_issues) > 1:
+                logger.warning(
+                    f"Found {len(matching_issues)} issues for role '{role_name}', "
+                    f"using canonical #{canonical_data.get('iid')}"
+                )
+
+            # Get role_id if available
+            role = self.db.get_role(role_name)
+            role_id = role.id if role else None
+
+            issue = Issue(
+                id=canonical_data["id"],
+                iid=canonical_data["iid"],
+                role_id=role_id,
+                iteration_id=canonical_data.get("iteration", {}).get("id")
+                if canonical_data.get("iteration")
+                else None,
+                title=canonical_data["title"],
+                state=canonical_data["state"],
+                web_url=canonical_data["web_url"],
+                labels=json.dumps(canonical_data.get("labels", [])),
+                assignee=canonical_data.get("assignees", [{}])[0].get("username")
+                if canonical_data.get("assignees")
+                else None,
+                weight=canonical_data.get("weight"),
+            )
+
+            # Update local database
+            self.db.upsert_issue(issue)
+            return issue
 
         except Exception:
             return None

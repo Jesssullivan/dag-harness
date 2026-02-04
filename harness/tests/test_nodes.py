@@ -611,6 +611,11 @@ class TestValidateDeployNode:
     @pytest.mark.unit
     async def test_deploy_validation_timeout(self, tmp_path):
         """Edge case: validation times out."""
+        # Create site.yml so the node doesn't skip (v0.5.0 auto-detects ansible/ subdir)
+        ansible_dir = tmp_path / "ansible"
+        ansible_dir.mkdir()
+        (ansible_dir / "site.yml").touch()
+
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd="ansible-playbook", timeout=60)
 
@@ -805,19 +810,32 @@ class TestCreateIssueNode:
     @pytest.mark.unit
     async def test_create_issue_success(self, db_with_test_role):
         """Happy path: issue created successfully."""
-        mock_issue = MagicMock()
-        mock_issue.web_url = "https://gitlab.example.com/issues/123"
-        mock_issue.iid = 123
+        mock_issue = {
+            "web_url": "https://gitlab.example.com/issues/123",
+            "iid": 123,
+        }
+        mock_iteration = {"id": 456, "title": "Iteration 1"}
 
-        mock_iteration = MagicMock()
-        mock_iteration.id = 456
+        with (
+            patch("harness.gitlab.http_client.GitLabAPI") as mock_api_class,
+            patch("harness.gitlab.http_client.GitLabAPIConfig") as mock_config_class,
+        ):
+            # Set up mock config
+            mock_config = MagicMock()
+            mock_config.project_path = "test/project"
+            mock_config.default_assignee = "test_user"
+            mock_config.default_labels = ["role", "ansible"]
+            mock_config_class.from_harness_yml.return_value = mock_config
 
-        with patch("harness.gitlab.api.GitLabClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.get_current_iteration.return_value = mock_iteration
-            mock_client.prepare_labels_for_role.return_value = ["role", "wave::1"]
-            mock_client.get_or_create_issue.return_value = (mock_issue, True)
-            mock_client_class.return_value = mock_client
+            # Set up mock API with async context manager
+            mock_api = AsyncMock()
+            mock_api.get_current_iteration = AsyncMock(return_value=mock_iteration)
+            mock_api.ensure_label_exists = AsyncMock()
+            mock_api.get_or_create_issue = AsyncMock(return_value=(mock_issue, True))
+
+            # Configure context manager
+            mock_api_class.return_value.__aenter__ = AsyncMock(return_value=mock_api)
+            mock_api_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
             state: BoxUpRoleState = {
                 "role_name": "test_role",
@@ -837,16 +855,31 @@ class TestCreateIssueNode:
     @pytest.mark.unit
     async def test_create_issue_existing_reused(self, db_with_test_role):
         """Edge case: existing issue reused (idempotent)."""
-        mock_issue = MagicMock()
-        mock_issue.web_url = "https://gitlab.example.com/issues/99"
-        mock_issue.iid = 99
+        mock_issue = {
+            "web_url": "https://gitlab.example.com/issues/99",
+            "iid": 99,
+        }
 
-        with patch("harness.gitlab.api.GitLabClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.get_current_iteration.return_value = None
-            mock_client.prepare_labels_for_role.return_value = ["role"]
-            mock_client.get_or_create_issue.return_value = (mock_issue, False)  # Not created
-            mock_client_class.return_value = mock_client
+        with (
+            patch("harness.gitlab.http_client.GitLabAPI") as mock_api_class,
+            patch("harness.gitlab.http_client.GitLabAPIConfig") as mock_config_class,
+        ):
+            # Set up mock config
+            mock_config = MagicMock()
+            mock_config.project_path = "test/project"
+            mock_config.default_assignee = "test_user"
+            mock_config.default_labels = ["role"]
+            mock_config_class.from_harness_yml.return_value = mock_config
+
+            # Set up mock API with async context manager
+            mock_api = AsyncMock()
+            mock_api.get_current_iteration = AsyncMock(return_value=None)
+            mock_api.ensure_label_exists = AsyncMock()
+            mock_api.get_or_create_issue = AsyncMock(return_value=(mock_issue, False))  # Not created
+
+            # Configure context manager
+            mock_api_class.return_value.__aenter__ = AsyncMock(return_value=mock_api)
+            mock_api_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
             state: BoxUpRoleState = {
                 "role_name": "test_role",
@@ -864,12 +897,26 @@ class TestCreateIssueNode:
     @pytest.mark.unit
     async def test_create_issue_api_error(self, db_with_test_role):
         """Error handling: GitLab API error."""
-        with patch("harness.gitlab.api.GitLabClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.get_current_iteration.return_value = None
-            mock_client.prepare_labels_for_role.return_value = ["role"]
-            mock_client.get_or_create_issue.side_effect = RuntimeError("API error: 500")
-            mock_client_class.return_value = mock_client
+        with (
+            patch("harness.gitlab.http_client.GitLabAPI") as mock_api_class,
+            patch("harness.gitlab.http_client.GitLabAPIConfig") as mock_config_class,
+        ):
+            # Set up mock config
+            mock_config = MagicMock()
+            mock_config.project_path = "test/project"
+            mock_config.default_assignee = "test_user"
+            mock_config.default_labels = ["role"]
+            mock_config_class.from_harness_yml.return_value = mock_config
+
+            # Set up mock API that raises error
+            mock_api = AsyncMock()
+            mock_api.get_current_iteration = AsyncMock(return_value=None)
+            mock_api.ensure_label_exists = AsyncMock()
+            mock_api.get_or_create_issue = AsyncMock(side_effect=RuntimeError("API error: 500"))
+
+            # Configure context manager
+            mock_api_class.return_value.__aenter__ = AsyncMock(return_value=mock_api)
+            mock_api_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
             state: BoxUpRoleState = {
                 "role_name": "test_role",
@@ -910,16 +957,36 @@ class TestCreateMRNode:
     @pytest.mark.unit
     async def test_create_mr_success(self, db_with_test_role):
         """Happy path: MR created successfully."""
-        mock_mr = MagicMock()
-        mock_mr.web_url = "https://gitlab.example.com/merge_requests/456"
-        mock_mr.iid = 456
+        mock_mr = {
+            "web_url": "https://gitlab.example.com/merge_requests/456",
+            "iid": 456,
+        }
 
-        with patch("harness.gitlab.api.GitLabClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.config.default_reviewers = ["reviewer1"]
-            mock_client.get_or_create_mr.return_value = (mock_mr, True)
-            mock_client.set_mr_reviewers.return_value = True
-            mock_client_class.return_value = mock_client
+        with (
+            patch("harness.gitlab.http_client.GitLabAPI") as mock_api_class,
+            patch("harness.gitlab.http_client.GitLabAPIConfig") as mock_config_class,
+            patch("harness.gitlab.templates.render_mr_description") as mock_render,
+        ):
+            # Set up mock config
+            mock_config = MagicMock()
+            mock_config.project_path = "test/project"
+            mock_config.default_assignee = "test_user"
+            mock_config.default_labels = ["role", "ansible"]
+            mock_config.default_reviewers = ["reviewer1"]
+            mock_config_class.from_harness_yml.return_value = mock_config
+
+            # Mock template rendering
+            mock_render.return_value = "## Summary\nTest MR description"
+
+            # Set up mock API with async context manager
+            mock_api = AsyncMock()
+            mock_api.find_mr_by_branch = AsyncMock(return_value=None)  # No existing MR
+            mock_api.get_or_create_mr = AsyncMock(return_value=(mock_mr, True))
+            mock_api.set_mr_reviewers = AsyncMock(return_value=True)
+
+            # Configure context manager
+            mock_api_class.return_value.__aenter__ = AsyncMock(return_value=mock_api)
+            mock_api_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
             state: BoxUpRoleState = {
                 "role_name": "test_role",
@@ -933,21 +1000,40 @@ class TestCreateMRNode:
             assert result["mr_url"] == "https://gitlab.example.com/merge_requests/456"
             assert result["mr_iid"] == 456
             assert result["mr_created"] is True
-            assert result["reviewers_set"] is True
+            assert "create_merge_request" in result["completed_nodes"]
 
     @pytest.mark.asyncio
     @pytest.mark.unit
     async def test_create_mr_existing_reused(self, db_with_test_role):
         """Edge case: existing MR reused."""
-        mock_mr = MagicMock()
-        mock_mr.web_url = "https://gitlab.example.com/merge_requests/789"
-        mock_mr.iid = 789
+        mock_existing_mr = {
+            "web_url": "https://gitlab.example.com/merge_requests/789",
+            "iid": 789,
+        }
 
-        with patch("harness.gitlab.api.GitLabClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.config.default_reviewers = []
-            mock_client.get_or_create_mr.return_value = (mock_mr, False)  # Not created
-            mock_client_class.return_value = mock_client
+        with (
+            patch("harness.gitlab.http_client.GitLabAPI") as mock_api_class,
+            patch("harness.gitlab.http_client.GitLabAPIConfig") as mock_config_class,
+            patch("harness.gitlab.templates.render_mr_description") as mock_render,
+        ):
+            # Set up mock config
+            mock_config = MagicMock()
+            mock_config.project_path = "test/project"
+            mock_config.default_assignee = "test_user"
+            mock_config.default_labels = ["role"]
+            mock_config.default_reviewers = []
+            mock_config_class.from_harness_yml.return_value = mock_config
+
+            # Mock template rendering
+            mock_render.return_value = "## Summary\nTest MR description"
+
+            # Set up mock API - return existing opened MR
+            mock_api = AsyncMock()
+            mock_api.find_mr_by_branch = AsyncMock(return_value=mock_existing_mr)
+
+            # Configure context manager
+            mock_api_class.return_value.__aenter__ = AsyncMock(return_value=mock_api)
+            mock_api_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
             state: BoxUpRoleState = {
                 "role_name": "test_role",
@@ -981,10 +1067,30 @@ class TestCreateMRNode:
     @pytest.mark.unit
     async def test_create_mr_api_error(self, db_with_test_role):
         """Error handling: GitLab API error."""
-        with patch("harness.gitlab.api.GitLabClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.get_or_create_mr.side_effect = RuntimeError("MR creation failed")
-            mock_client_class.return_value = mock_client
+        with (
+            patch("harness.gitlab.http_client.GitLabAPI") as mock_api_class,
+            patch("harness.gitlab.http_client.GitLabAPIConfig") as mock_config_class,
+            patch("harness.gitlab.templates.render_mr_description") as mock_render,
+        ):
+            # Set up mock config
+            mock_config = MagicMock()
+            mock_config.project_path = "test/project"
+            mock_config.default_assignee = "test_user"
+            mock_config.default_labels = ["role"]
+            mock_config.default_reviewers = []
+            mock_config_class.from_harness_yml.return_value = mock_config
+
+            # Mock template rendering
+            mock_render.return_value = "## Summary\nTest MR description"
+
+            # Set up mock API that raises error
+            mock_api = AsyncMock()
+            mock_api.find_mr_by_branch = AsyncMock(return_value=None)
+            mock_api.get_or_create_mr = AsyncMock(side_effect=RuntimeError("MR creation failed"))
+
+            # Configure context manager
+            mock_api_class.return_value.__aenter__ = AsyncMock(return_value=mock_api)
+            mock_api_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
             state: BoxUpRoleState = {
                 "role_name": "test_role",
@@ -1678,12 +1784,26 @@ class TestCreateIssueNodeExtended:
     @pytest.mark.unit
     async def test_create_issue_value_error(self, db_with_test_role):
         """Edge case: ValueError raised (e.g., role not found in DB)."""
-        with patch("harness.gitlab.api.GitLabClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.get_current_iteration.return_value = None
-            mock_client.prepare_labels_for_role.return_value = []
-            mock_client.get_or_create_issue.side_effect = ValueError("Role 'x' not found in DB")
-            mock_client_class.return_value = mock_client
+        with (
+            patch("harness.gitlab.http_client.GitLabAPI") as mock_api_class,
+            patch("harness.gitlab.http_client.GitLabAPIConfig") as mock_config_class,
+        ):
+            # Set up mock config
+            mock_config = MagicMock()
+            mock_config.project_path = "test/project"
+            mock_config.default_assignee = "test_user"
+            mock_config.default_labels = []
+            mock_config_class.from_harness_yml.return_value = mock_config
+
+            # Set up mock API that raises ValueError
+            mock_api = AsyncMock()
+            mock_api.get_current_iteration = AsyncMock(return_value=None)
+            mock_api.ensure_label_exists = AsyncMock()
+            mock_api.get_or_create_issue = AsyncMock(side_effect=ValueError("Role 'x' not found in DB"))
+
+            # Configure context manager
+            mock_api_class.return_value.__aenter__ = AsyncMock(return_value=mock_api)
+            mock_api_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
             state: BoxUpRoleState = {
                 "role_name": "test_role",
@@ -1706,15 +1826,36 @@ class TestCreateMRNodeExtended:
     @pytest.mark.unit
     async def test_create_mr_from_issue_closes_ref(self, db_with_test_role):
         """Edge case: MR description should reference closing the issue."""
-        mock_mr = MagicMock()
-        mock_mr.web_url = "https://gitlab.example.com/mr/500"
-        mock_mr.iid = 500
+        mock_mr = {
+            "web_url": "https://gitlab.example.com/mr/500",
+            "iid": 500,
+        }
 
-        with patch("harness.gitlab.api.GitLabClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.config.default_reviewers = []
-            mock_client.get_or_create_mr.return_value = (mock_mr, True)
-            mock_client_class.return_value = mock_client
+        with (
+            patch("harness.gitlab.http_client.GitLabAPI") as mock_api_class,
+            patch("harness.gitlab.http_client.GitLabAPIConfig") as mock_config_class,
+            patch("harness.gitlab.templates.render_mr_description") as mock_render,
+        ):
+            # Set up mock config
+            mock_config = MagicMock()
+            mock_config.project_path = "test/project"
+            mock_config.default_assignee = "test_user"
+            mock_config.default_labels = ["role"]
+            mock_config.default_reviewers = []
+            mock_config_class.from_harness_yml.return_value = mock_config
+
+            # Mock template rendering
+            mock_render.return_value = "## Summary\nCloses #42"
+
+            # Set up mock API
+            mock_api = AsyncMock()
+            mock_api.find_mr_by_branch = AsyncMock(return_value=None)
+            mock_api.get_or_create_mr = AsyncMock(return_value=(mock_mr, True))
+            mock_api.set_mr_reviewers = AsyncMock(return_value=True)
+
+            # Configure context manager
+            mock_api_class.return_value.__aenter__ = AsyncMock(return_value=mock_api)
+            mock_api_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
             state: BoxUpRoleState = {
                 "role_name": "test_role",
@@ -1725,24 +1866,44 @@ class TestCreateMRNodeExtended:
             }
             result = await create_mr_node(state)
 
-            # Verify get_or_create_mr was called with issue_iid
-            call_kwargs = mock_client.get_or_create_mr.call_args
-            assert call_kwargs.kwargs.get("issue_iid") == 42
+            # Verify render_mr_description was called with issue_iid in context
+            call_args = mock_render.call_args[0][0]
+            assert call_args.get("issue_iid") == 42
 
     @pytest.mark.asyncio
     @pytest.mark.unit
     async def test_create_mr_reviewers_fail(self, db_with_test_role):
         """Edge case: MR created but setting reviewers fails."""
-        mock_mr = MagicMock()
-        mock_mr.web_url = "https://gitlab.example.com/mr/600"
-        mock_mr.iid = 600
+        mock_mr = {
+            "web_url": "https://gitlab.example.com/mr/600",
+            "iid": 600,
+        }
 
-        with patch("harness.gitlab.api.GitLabClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.config.default_reviewers = ["user1", "user2"]
-            mock_client.get_or_create_mr.return_value = (mock_mr, True)
-            mock_client.set_mr_reviewers.return_value = False  # Reviewer assignment fails
-            mock_client_class.return_value = mock_client
+        with (
+            patch("harness.gitlab.http_client.GitLabAPI") as mock_api_class,
+            patch("harness.gitlab.http_client.GitLabAPIConfig") as mock_config_class,
+            patch("harness.gitlab.templates.render_mr_description") as mock_render,
+        ):
+            # Set up mock config
+            mock_config = MagicMock()
+            mock_config.project_path = "test/project"
+            mock_config.default_assignee = "test_user"
+            mock_config.default_labels = ["role"]
+            mock_config.default_reviewers = ["user1", "user2"]
+            mock_config_class.from_harness_yml.return_value = mock_config
+
+            # Mock template rendering
+            mock_render.return_value = "## Summary\nTest MR"
+
+            # Set up mock API with reviewer failure
+            mock_api = AsyncMock()
+            mock_api.find_mr_by_branch = AsyncMock(return_value=None)
+            mock_api.get_or_create_mr = AsyncMock(return_value=(mock_mr, True))
+            mock_api.set_mr_reviewers = AsyncMock(return_value=False)  # Reviewer assignment fails
+
+            # Configure context manager
+            mock_api_class.return_value.__aenter__ = AsyncMock(return_value=mock_api)
+            mock_api_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
             state: BoxUpRoleState = {
                 "role_name": "test_role",
@@ -1753,10 +1914,10 @@ class TestCreateMRNodeExtended:
             }
             result = await create_mr_node(state)
 
-            # MR should still be created despite reviewer failure
+            # MR should be created successfully (reviewer assignment is no longer done in create_mr_node)
             assert result["mr_iid"] == 600
             assert result["mr_created"] is True
-            assert result["reviewers_set"] is False
+            assert "create_merge_request" in result["completed_nodes"]
 
 
 class TestHumanApprovalNodeExtended:

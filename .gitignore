@@ -39,3 +39,10 @@ htmlcov/
 .coverage
 coverage.xml
 benchmark.json
+
+# harness state (auto-generated)
+.harness/*.db
+.harness/*.db-journal
+.harness/*.db-wal
+.harness/*.db-shm
+.harness/*.log

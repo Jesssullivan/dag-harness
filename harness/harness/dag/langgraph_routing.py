@@ -102,15 +102,26 @@ def should_continue_after_reverse_deps(
 
 def should_continue_after_worktree(
     state: BoxUpRoleState,
-) -> Literal["parallel_tests", "notify_failure"]:
+) -> Literal["run_molecule", "create_worktree", "notify_failure"]:
     """
-    Route after worktree creation.
+    Route after worktree creation with recovery support (sequential mode).
 
-    Task #21: Now routes to parallel test execution via route_to_parallel_tests.
+    If worktree_force_recreate is True, loop back for retry.
+    For parallel test execution, use _route_after_worktree_with_recovery in builder.
     """
+    # Check for recovery loop - worktree needs to be recreated
+    if state.get("worktree_force_recreate") or state.get("branch_force_recreate"):
+        # Check max retries to prevent infinite loops
+        recovery_attempts = state.get("recovery_attempts", [])
+        worktree_attempts = [a for a in recovery_attempts if a.get("node") == "create_worktree"]
+        max_attempts = state.get("max_recovery_attempts", 2)
+        if len(worktree_attempts) >= max_attempts:
+            return "notify_failure"
+        return "create_worktree"  # Loop back for retry
+
     if state.get("errors"):
         return "notify_failure"
-    return "parallel_tests"
+    return "run_molecule"
 
 
 # Note: should_continue_after_molecule and should_continue_after_pytest are deprecated
@@ -145,8 +156,38 @@ def should_continue_after_pytest(
 
 def should_continue_after_deploy(
     state: BoxUpRoleState,
-) -> Literal["create_commit", "notify_failure"]:
-    """Route after deploy validation."""
+) -> Literal["create_commit", "validate_deploy", "recovery", "notify_failure"]:
+    """
+    Route after deploy validation with recovery support.
+
+    v0.6.0: Routes to "recovery" subgraph for complex recoverable errors.
+    Simple path corrections still use the self-loop (tier 1).
+    """
+    from harness.dag.recovery_config import get_recovery_config
+
+    # Check if recovery resolved the issue (v0.6.0)
+    if state.get("recovery_result") == "resolved" and state.get("last_error_node") == "validate_deploy":
+        return "create_commit"
+
+    # Check for recovery loop - path was corrected (tier 1 inline)
+    if state.get("ansible_cwd") and state.get("deploy_passed") is None:
+        config = get_recovery_config("validate_deploy")
+        recovery_attempts = state.get("recovery_attempts", [])
+        deploy_attempts = [a for a in recovery_attempts if a.get("node") == "validate_deploy"]
+        if len(deploy_attempts) >= config.max_iterations:
+            return "notify_failure"
+        return "validate_deploy"  # Loop back for retry
+
+    # v0.6.0: Route to recovery subgraph for complex errors
+    if (
+        state.get("last_error_node") == "validate_deploy"
+        and state.get("last_error_type") in ("recoverable", "user_fixable")
+        and state.get("recovery_result") != "resolved"
+        and state.get("deploy_passed") is None
+        and not state.get("errors")
+    ):
+        return "recovery"
+
     if state.get("deploy_passed") is False:
         return "notify_failure"
     return "create_commit"
@@ -189,6 +230,42 @@ def should_continue_after_human_approval(
     return "notify_failure"
 
 
+# ============================================================================
+# RECOVERY SUBGRAPH ROUTING (v0.6.0)
+# ============================================================================
+
+
+def route_after_recovery(
+    state: BoxUpRoleState,
+) -> Literal[
+    "create_worktree", "validate_deploy", "run_molecule", "run_pytest", "notify_failure"
+]:
+    """
+    Route after recovery subgraph completes.
+
+    Based on recovery_result and last_error_node, routes back to the
+    node that originally failed, or to notify_failure if escalated.
+    """
+    result = state.get("recovery_result")
+    failed_node = state.get("last_error_node")
+
+    if result == "escalate" or result is None:
+        return "notify_failure"
+
+    if result == "resolved":
+        # Route back to the node that failed so it can retry
+        valid_targets = {
+            "create_worktree", "validate_deploy", "run_molecule", "run_pytest",
+        }
+        if failed_node in valid_targets:
+            return failed_node
+        return "notify_failure"
+
+    # "continue" shouldn't reach here (handled internally by subgraph),
+    # but route to failure as safety net
+    return "notify_failure"
+
+
 __all__ = [
     # Parallel test routing
     "route_to_parallel_tests",
@@ -206,4 +283,6 @@ __all__ = [
     "should_continue_after_issue",
     "should_continue_after_mr",
     "should_continue_after_human_approval",
+    # Recovery routing (v0.6.0)
+    "route_after_recovery",
 ]

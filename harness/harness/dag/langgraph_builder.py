@@ -48,12 +48,60 @@ from harness.dag.langgraph_routing import (
     should_continue_after_pytest,
     should_continue_after_reverse_deps,
     should_continue_after_validation,
+    should_continue_after_worktree,
 )
 from harness.dag.langgraph_state import (
     DEFAULT_BREAKPOINTS,
     BoxUpRoleState,
     get_breakpoints_enabled,
 )
+from harness.dag.recovery_subgraph import create_recovery_subgraph
+
+
+def _route_after_worktree_with_recovery(state: BoxUpRoleState):
+    """
+    Combined routing function for worktree -> tests with recovery support.
+
+    v0.6.0: Routes to "recovery" subgraph for recoverable errors instead of
+    simple self-loops when the error type indicates a complex fix is needed.
+
+    Returns:
+        - "recovery" if a recoverable error needs agentic fix (v0.6.0)
+        - "create_worktree" if simple recovery is needed (self-loop, v0.5.0 compat)
+        - "notify_failure" if errors or max retries exceeded
+        - List[Send] for parallel test execution on success
+    """
+    from langgraph.types import Send
+
+    from harness.dag.recovery_config import get_recovery_config
+
+    # Check for recovery loop - worktree needs to be recreated
+    if state.get("worktree_force_recreate") or state.get("branch_force_recreate"):
+        config = get_recovery_config("create_worktree")
+        recovery_attempts = state.get("recovery_attempts", [])
+        worktree_attempts = [a for a in recovery_attempts if a.get("node") == "create_worktree"]
+        if len(worktree_attempts) >= config.max_iterations:
+            return "notify_failure"
+        return "create_worktree"  # Loop back for retry (tier 1)
+
+    # v0.6.0: Check if recovery subgraph should handle this
+    if (
+        state.get("last_error_node") == "create_worktree"
+        and state.get("last_error_type") in ("recoverable", "user_fixable")
+        and state.get("recovery_result") != "resolved"
+        and not state.get("errors")
+    ):
+        return "recovery"
+
+    # Recovery resolved - check if it was successful
+    if state.get("recovery_result") == "resolved":
+        return route_to_parallel_tests(state)
+
+    if state.get("errors"):
+        return "notify_failure"
+
+    # No recovery needed - route to parallel tests
+    return route_to_parallel_tests(state)
 
 
 def create_box_up_role_graph(
@@ -103,6 +151,11 @@ def create_box_up_role_graph(
     # Create the graph
     graph = StateGraph(BoxUpRoleState)
 
+    # Create and compile the recovery subgraph (v0.6.0)
+    recovery_graph = create_recovery_subgraph()
+    compiled_recovery = recovery_graph.compile()
+    graph.add_node("recovery", compiled_recovery)
+
     # Add nodes without retry policies (local operations)
     graph.add_node("validate_role", validate_role_node)
     graph.add_node("analyze_deps", analyze_deps_node)
@@ -146,13 +199,28 @@ def create_box_up_role_graph(
     graph.add_conditional_edges("analyze_deps", should_continue_after_deps)
     graph.add_conditional_edges("check_reverse_deps", should_continue_after_reverse_deps)
 
+    # v0.6.0: Recovery subgraph routing
+    # After recovery completes, route based on recovery_result
+    from harness.dag.langgraph_routing import route_after_recovery
+
+    graph.add_conditional_edges(
+        "recovery",
+        route_after_recovery,
+        ["create_worktree", "validate_deploy", "run_molecule", "run_pytest",
+         "notify_failure"],
+    )
+
     if parallel_tests:
-        # Task #21: Parallel test execution using Send API
+        # Task #21: Parallel test execution using Send API with recovery support
         # create_worktree -> [parallel: run_molecule, run_pytest] -> merge_test_results
+        # OR create_worktree -> create_worktree (recovery loop)
+        # OR create_worktree -> recovery (v0.6.0 subgraph)
+        # OR create_worktree -> notify_failure
         graph.add_conditional_edges(
             "create_worktree",
-            route_to_parallel_tests,
-            ["run_molecule", "run_pytest", "merge_test_results"],
+            _route_after_worktree_with_recovery,
+            ["run_molecule", "run_pytest", "merge_test_results", "create_worktree",
+             "recovery", "notify_failure"],
         )
 
         # Both parallel test nodes converge at merge_test_results
@@ -163,14 +231,21 @@ def create_box_up_role_graph(
         graph.add_conditional_edges("merge_test_results", should_continue_after_merge)
     else:
         # Legacy sequential test execution (for debugging or backwards compatibility)
+        # Still includes recovery support for worktree creation
         graph.add_conditional_edges(
             "create_worktree",
-            lambda state: "run_molecule" if not state.get("errors") else "notify_failure",
+            should_continue_after_worktree,
+            ["run_molecule", "create_worktree", "notify_failure"],
         )
         graph.add_conditional_edges("run_molecule", should_continue_after_molecule)
         graph.add_conditional_edges("run_pytest", should_continue_after_pytest)
 
-    graph.add_conditional_edges("validate_deploy", should_continue_after_deploy)
+    # Route from validate_deploy with recovery support (self-loop + recovery subgraph)
+    graph.add_conditional_edges(
+        "validate_deploy",
+        should_continue_after_deploy,
+        ["create_commit", "validate_deploy", "recovery", "notify_failure"],
+    )
     graph.add_conditional_edges("create_commit", should_continue_after_commit)
     graph.add_conditional_edges("push_branch", should_continue_after_push)
     graph.add_conditional_edges("create_issue", should_continue_after_issue)

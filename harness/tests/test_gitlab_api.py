@@ -1,7 +1,7 @@
 """Unit tests for the GitLab API client."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -2071,27 +2071,42 @@ class TestMRLifecycleIntegration:
     """Integration tests for MR lifecycle in workflow."""
 
     @pytest.mark.unit
-    def test_create_mr_node_sets_reviewers(self, db_with_roles, monkeypatch):
-        """Test that create_mr_node sets reviewers from config."""
-        # Set up environment for reviewers
-        monkeypatch.setenv("GITLAB_DEFAULT_REVIEWERS", "reviewer1,reviewer2")
-
+    @pytest.mark.asyncio
+    async def test_create_mr_node_creates_mr(self, db_with_roles, monkeypatch):
+        """Test that create_mr_node creates MR via async GitLabAPI."""
         from harness.dag.langgraph_engine import create_mr_node, set_module_db
 
         set_module_db(db_with_roles)
 
-        mock_mr = MagicMock()
-        mock_mr.iid = 456
-        mock_mr.web_url = "https://example.com/mr/456"
+        mock_mr = {
+            "iid": 456,
+            "web_url": "https://example.com/mr/456",
+        }
 
-        with patch("harness.gitlab.api.GitLabClient") as MockClient:
-            mock_client = MagicMock()
-            mock_client.config.default_reviewers = ["reviewer1", "reviewer2"]
-            mock_client.get_or_create_mr.return_value = (mock_mr, True)
-            mock_client.set_mr_reviewers.return_value = True
-            MockClient.return_value = mock_client
+        with (
+            patch("harness.gitlab.http_client.GitLabAPI") as mock_api_class,
+            patch("harness.gitlab.http_client.GitLabAPIConfig") as mock_config_class,
+            patch("harness.gitlab.templates.render_mr_description") as mock_render,
+        ):
+            # Set up mock config
+            mock_config = MagicMock()
+            mock_config.project_path = "test/project"
+            mock_config.default_assignee = "test_user"
+            mock_config.default_labels = ["role", "ansible"]
+            mock_config.default_reviewers = ["reviewer1", "reviewer2"]
+            mock_config_class.from_harness_yml.return_value = mock_config
 
-            import asyncio
+            # Mock template rendering
+            mock_render.return_value = "## Summary\nTest MR description"
+
+            # Set up mock API with async context manager
+            mock_api = AsyncMock()
+            mock_api.find_mr_by_branch = AsyncMock(return_value=None)  # No existing MR
+            mock_api.get_or_create_mr = AsyncMock(return_value=(mock_mr, True))
+
+            # Configure context manager
+            mock_api_class.return_value.__aenter__ = AsyncMock(return_value=mock_api)
+            mock_api_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
             state = {
                 "role_name": "common",
@@ -2101,8 +2116,8 @@ class TestMRLifecycleIntegration:
                 "wave_name": "Foundation",
             }
 
-            result = asyncio.run(create_mr_node(state))
+            result = await create_mr_node(state)
 
             assert result["mr_iid"] == 456
-            assert result["reviewers_set"] is True
-            mock_client.set_mr_reviewers.assert_called_once_with(456, ["reviewer1", "reviewer2"])
+            assert result["mr_created"] is True
+            assert "create_merge_request" in result["completed_nodes"]
