@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Commit-msg hook: Enforce commit message standards
+#
+# Installation:
+#   ./scripts/install-hooks.sh .
+#   # or: git config core.hooksPath hooks/templates
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
+
+# =============================================================================
+# Block AI Attribution
+# =============================================================================
+
+if echo "$COMMIT_MSG" | grep -Eqi "ai-generated|ai-assisted|co-authored-by.*(ai|llm|claude|gpt|copilot|bot)"; then
+    echo "ERROR: AI attribution detected in commit message"
+    echo "Remove AI-related Co-Authored-By or attribution lines"
+    exit 1
+fi
+
+# =============================================================================
+# Conventional Commits Format (Optional - set ENFORCE_CONVENTIONAL=1)
+# =============================================================================
+
+ENFORCE_CONVENTIONAL="${ENFORCE_CONVENTIONAL:-0}"
+
+if [ "$ENFORCE_CONVENTIONAL" = "1" ]; then
+    # Pattern: type(scope): description
+    # Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+    CONVENTIONAL_PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?: .{1,72}"
+
+    FIRST_LINE=$(echo "$COMMIT_MSG" | head -1)
+
+    if ! echo "$FIRST_LINE" | grep -Eq "$CONVENTIONAL_PATTERN"; then
+        echo "ERROR: Commit message does not follow Conventional Commits format"
+        echo ""
+        echo "Expected format: type(scope): description"
+        echo ""
+        echo "Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+        echo "Example: feat(auth): add OAuth2 login support"
+        echo ""
+        echo "Your message: $FIRST_LINE"
+        exit 1
+    fi
+fi
+
+exit 0

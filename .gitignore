@@ -168,8 +168,5 @@ site/
 # Local environment overrides
 .envrc
 
-# Local git hooks (not shared upstream)
-.githooks/
-
-# Internal planning docs
+# Internal planning docs (AI-generated)
 PLAN.md

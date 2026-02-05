@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Pre-commit hook: Block AI artifacts and enforce coding standards
+#
+# Installation:
+#   ./scripts/install-hooks.sh .
+#   # or: git config core.hooksPath hooks/templates
+
+set -euo pipefail
+
+echo "Running pre-commit checks..."
+
+# =============================================================================
+# AI Attribution Blocking
+# =============================================================================
+# Block commits containing AI co-author trailers
+# Note: Excludes hooks/templates/ from this check (self-reference)
+
+AI_COAUTHOR_CHECK=$(git diff --cached -- ':!hooks/templates/*' | grep -qi "co-authored-by.*\(ai\|llm\|assistant\|bot\|claude\|gpt\|copilot\)" && echo "found" || echo "")
+if [ -n "$AI_COAUTHOR_CHECK" ]; then
+    echo "ERROR: AI co-authoring detected in commit"
+    echo "Remove Co-Authored-By lines referencing AI/LLM tools"
+    exit 1
+fi
+
+# Block AI-related files from being committed
+AI_PATTERNS=(
+    "CLAUDE"
+    ".claude/"
+    ".claudeignore"
+    ".mcp.json"
+    ".mcp/"
+    ".steering/"
+    ".hive-mind/"
+    ".swarm/"
+    ".cursor/"
+    ".aider"
+    ".continue/"
+    "PLAN.md"
+)
+
+for pattern in "${AI_PATTERNS[@]}"; do
+    if git diff --cached --name-only | grep -qi "$pattern"; then
+        echo "ERROR: AI-related file detected: $pattern"
+        echo "These files should not be committed to the repository"
+        exit 1
+    fi
+done
+
+# =============================================================================
+# Secret Detection
+# =============================================================================
+# Block commits containing potential secrets
+# Note: Excludes hooks/templates/ from checks (self-reference)
+
+SECRET_CHECK=$(git diff --cached -- ':!hooks/templates/*' | grep -Eqi "PRIVATE.KEY|AWS_SECRET|GITLAB_TOKEN" && echo "found" || echo "")
+if [ -n "$SECRET_CHECK" ]; then
+    echo "ERROR: Potential secret detected"
+    echo "Please remove sensitive data before committing"
+    exit 1
+fi
+
+PRIVKEY_CHECK=$(git diff --cached -- ':!hooks/templates/*' | grep -E "BEGIN.*PRIVATE" && echo "found" || echo "")
+if [ -n "$PRIVKEY_CHECK" ]; then
+    echo "ERROR: Private key detected in diff"
+    exit 1
+fi
+
+# =============================================================================
+# File Size Check
+# =============================================================================
+# Warn about large files (>1MB)
+
+while IFS= read -r file; do
+    if [ -f "$file" ]; then
+        size=$(wc -c < "$file" 2>/dev/null || echo 0)
+        if [ "$size" -gt 1048576 ]; then
+            echo "WARNING: Large file detected: $file (${size} bytes)"
+            echo "Consider using Git LFS for large binary files"
+        fi
+    fi
+done < <(git diff --cached --name-only)
+
+echo "Pre-commit checks passed"
+exit 0
