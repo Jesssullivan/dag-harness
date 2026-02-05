@@ -7,33 +7,33 @@ This document provides detailed information for LLMs interacting with DAG Harnes
 ### Quick Install (Recommended)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/Jesssullivan/Ansible-DAG-Harness/main/scripts/bootstrap.sh | bash
 ```
 
 ### Via uv (from GitHub)
 
 ```bash
 # Specific version
-uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+uv tool install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
 # Latest from main
-uv tool install git+https://github.com/Jesssullivan/dag-harness.git
+uv tool install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git
 ```
 
 ### Via pip (from GitHub)
 
 ```bash
 # Specific version
-pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+pip install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
 # Direct wheel URL (fastest)
-pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+pip install https://github.com/Jesssullivan/Ansible-DAG-Harness/releases/download/latest/dag_harness-latest-py3-none-any.whl
 ```
 
 ### From Source
 
 ```bash
-git clone https://github.com/Jesssullivan/dag-harness.git
+git clone https://github.com/Jesssullivan/Ansible-DAG-Harness.git
 cd dag-harness/harness
 uv sync  # or: pip install -e .
 ```
@@ -71,7 +71,7 @@ DAG Harness is a **self-installing orchestration system** for managing Ansible r
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Workflow DAG (14 nodes)
+## Workflow DAG (17 nodes)
 
 ```mermaid
 graph TD

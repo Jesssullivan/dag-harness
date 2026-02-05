@@ -101,7 +101,7 @@ plugins:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/Jesssullivan/dag-harness
+      link: https://github.com/Jesssullivan/Ansible-DAG-Harness
     - icon: fontawesome/brands/gitlab
       link: https://gitlab.com/tinyland/projects/dag-harness
 

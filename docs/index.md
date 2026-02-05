@@ -26,33 +26,33 @@ human-on-the-loop autonomous operation, and wave-based parallel execution.
 === "Quick Install"
 
     ```bash
-    curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/scripts/bootstrap.sh | bash
+    curl -sSL https://raw.githubusercontent.com/Jesssullivan/Ansible-DAG-Harness/main/scripts/bootstrap.sh | bash
     ```
 
 === "uv"
 
     ```bash
     # From GitHub (specific version)
-    uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+    uv tool install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
     # From GitHub (latest)
-    uv tool install git+https://github.com/Jesssullivan/dag-harness.git
+    uv tool install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git
     ```
 
 === "pip"
 
     ```bash
     # From GitHub
-    pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+    pip install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
     # Direct wheel (fastest)
-    pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+    pip install https://github.com/Jesssullivan/Ansible-DAG-Harness/releases/download/latest/dag_harness-latest-py3-none-any.whl
     ```
 
 === "From Source"
 
     ```bash
-    git clone https://github.com/Jesssullivan/dag-harness.git
+    git clone https://github.com/Jesssullivan/Ansible-DAG-Harness.git
     cd dag-harness/harness
     uv sync  # or: pip install -e .
     ```
@@ -102,12 +102,12 @@ harness status
 
 ## Project Links
 
-- [Source Code (GitHub)](https://github.com/Jesssullivan/dag-harness)
+- [Source Code (GitHub)](https://github.com/Jesssullivan/Ansible-DAG-Harness)
 - [Source Code (GitLab)](https://gitlab.com/tinyland/projects/dag-harness)
-- [Changelog](https://github.com/Jesssullivan/dag-harness/blob/main/CHANGELOG.md)
-- [Issue Tracker](https://github.com/Jesssullivan/dag-harness/issues)
+- [Changelog](https://github.com/Jesssullivan/Ansible-DAG-Harness/blob/main/CHANGELOG.md)
+- [Issue Tracker](https://github.com/Jesssullivan/Ansible-DAG-Harness/issues)
 
 ## License
 
-MIT License -- see [LICENSE](https://github.com/Jesssullivan/dag-harness/blob/main/LICENSE)
+MIT License -- see [LICENSE](https://github.com/Jesssullivan/Ansible-DAG-Harness/blob/main/LICENSE)
 for details.

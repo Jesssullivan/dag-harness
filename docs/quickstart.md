@@ -27,7 +27,7 @@ uv pip install dag-harness
 ### From Source
 
 ```bash
-git clone https://github.com/Jesssullivan/dag-harness.git
+git clone https://github.com/Jesssullivan/Ansible-DAG-Harness.git
 cd dag-harness/harness
 uv sync
 ```

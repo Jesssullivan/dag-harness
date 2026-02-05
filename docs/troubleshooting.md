@@ -14,13 +14,13 @@ Try one of these installation methods:
 
 ```bash
 # Option 1: Install via uv from GitHub
-uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+uv tool install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
 # Option 2: Install via pip from GitHub
-pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+pip install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
 # Option 3: Direct wheel installation
-pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+pip install https://github.com/Jesssullivan/Ansible-DAG-Harness/releases/download/latest/dag_harness-latest-py3-none-any.whl
 
 # Option 4: From source
 cd harness
@@ -50,7 +50,7 @@ brew install git
 sudo apt-get install git
 
 # Or use direct wheel URL instead (no git required)
-pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+pip install https://github.com/Jesssullivan/Ansible-DAG-Harness/releases/download/latest/dag_harness-latest-py3-none-any.whl
 ```
 
 ### "Could not find a version that satisfies the requirement"
@@ -60,10 +60,10 @@ pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0
 **Solution:**
 ```bash
 # Install from GitHub, not PyPI
-pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+pip install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
 # Or use the bootstrap script
-curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/Jesssullivan/Ansible-DAG-Harness/main/scripts/bootstrap.sh | bash
 ```
 
 ### "Permission denied" during installation
@@ -73,15 +73,15 @@ curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/script
 **Solution:**
 ```bash
 # Option 1: Use --user flag
-pip install --user git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+pip install --user git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
 # Option 2: Use uv tool (installs to user space)
-uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+uv tool install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
 # Option 3: Use virtual environment
 python -m venv .venv
 source .venv/bin/activate
-pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+pip install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 ```
 
 ### "harness: command not found" after installation
@@ -367,6 +367,6 @@ harness hotl cancel_executions  # Start fresh
 ## Getting Help
 
 - **Docs:** https://disposable-ansible-dag.ephemera.xoxd.ai
-- **GitHub Issues:** https://github.com/Jesssullivan/dag-harness/issues
+- **GitHub Issues:** https://github.com/Jesssullivan/Ansible-DAG-Harness/issues
 - **GitLab Issues:** https://gitlab.com/tinyland/projects/dag-harness/-/issues
 - **LLM Docs:** See `docs/llms.md` for AI assistant reference

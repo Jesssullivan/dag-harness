@@ -16,7 +16,7 @@ This guide walks you through installing and configuring the DAG Harness.
 Bootstrap the harness in any repository with a single command:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/Jesssullivan/Ansible-DAG-Harness/main/scripts/bootstrap.sh | bash
 ```
 
 This will:
@@ -39,20 +39,20 @@ Install directly from GitHub using git+https:
 
 ```bash
 # Install specific version
-uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+uv tool install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
 # Install latest from main branch
-uv tool install git+https://github.com/Jesssullivan/dag-harness.git
+uv tool install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git
 ```
 
 ### Method 3: Install via pip (from GitHub)
 
 ```bash
 # Install specific version
-pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+pip install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git@main
 
 # Install latest from main branch
-pip install git+https://github.com/Jesssullivan/dag-harness.git
+pip install git+https://github.com/Jesssullivan/Ansible-DAG-Harness.git
 ```
 
 ### Method 4: Direct Wheel URL (Fastest)
@@ -60,7 +60,7 @@ pip install git+https://github.com/Jesssullivan/dag-harness.git
 Download and install the wheel directly from a GitHub release:
 
 ```bash
-pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+pip install https://github.com/Jesssullivan/Ansible-DAG-Harness/releases/download/latest/dag_harness-latest-py3-none-any.whl
 ```
 
 ### Method 5: Clone and Install Locally
@@ -68,7 +68,7 @@ pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0
 For development or contributing:
 
 ```bash
-git clone https://github.com/Jesssullivan/dag-harness.git
+git clone https://github.com/Jesssullivan/Ansible-DAG-Harness.git
 cd dag-harness/harness
 uv sync  # or: pip install -e .
 ```
