@@ -1,139 +1,72 @@
 # DAG Harness
 
-Self-installing DAG orchestration for Ansible role deployments using LangGraph.
+LangGraph DAG orchestration for Ansible role deployments with GitLab integration.
 
 ## Features
 
-- **14-Node LangGraph Workflow** - Box-up-role DAG with parallel testing, HITL gates, and merge train integration
-- **40+ MCP Tools** - Full Claude Code integration across 8 categories
-- **HOTL Mode** - Human Out of The Loop autonomous operation
-- **Cost Tracking** - Per-session token usage and cost reporting
-- **Self-Installing** - One command bootstrap with MCP client setup
+- **17-node workflow** with parallel testing, HITL gates, recovery subgraph
+- **30 MCP tools** across 9 categories for Claude Code integration
+- **HOTL mode** - Human Out of The Loop autonomous operation
+- **Checkpointing** - Resume from any node with SQLite persistence
 
 ## Installation
 
-### Install via uv (Recommended)
-
 ```bash
-# From GitHub (latest main)
-uv pip install git+https://github.com/Jesssullivan/dag-harness.git#subdirectory=harness
+# From source (recommended)
+git clone https://github.com/Jesssullivan/dag-harness.git
+cd dag-harness/harness
+uv sync
 
-# With extras
-uv pip install "dag-harness[dev] @ git+https://github.com/Jesssullivan/dag-harness.git#subdirectory=harness"
-```
-
-### Install via pip
-
-```bash
+# Or via pip
 pip install git+https://github.com/Jesssullivan/dag-harness.git#subdirectory=harness
 ```
 
-### Install from Source
+## Usage
 
 ```bash
-git clone https://github.com/Jesssullivan/dag-harness.git
-cd dag-harness/harness
-uv sync  # or: pip install -e .
+harness init                    # Initialize in repo
+harness box-up-role <role>      # Execute workflow
+harness status                  # Show status
+harness hotl start              # Autonomous mode
 ```
 
-## Quick Start
-
-```bash
-# Bootstrap (interactive setup)
-harness bootstrap
-
-# Verify installation
-harness bootstrap --check-only
-```
-
-## CLI Commands
-
-```bash
-# Core workflow
-harness box-up-role <role>     # Execute workflow for role
-harness status [role]          # Show role status
-harness list-roles             # List all roles
-harness sync                   # Sync from filesystem
-
-# HOTL autonomous mode
-harness hotl start             # Start autonomous operation
-harness hotl status            # Check status
-harness hotl stop              # Stop gracefully
-
-# Resume paused workflows
-harness resume <id>            # Resume execution
-harness resume <id> --approve  # Approve human gate
-harness resume <id> --reject   # Reject with reason
-
-# Database & debugging
-harness db stats               # Database statistics
-harness check                  # Run self-checks
-harness graph                  # Show workflow DAG
-harness costs report           # Cost breakdown
-```
-
-## Workflow DAG
-
-The `box-up-role` workflow processes Ansible roles through 14 nodes:
+## Workflow
 
 ```
 validate_role → analyze_deps → check_reverse_deps → create_worktree
-    ↓
+                                                          ↓
 run_molecule ─┬─→ merge_test_results → validate_deploy → create_commit
-run_pytest  ──┘
-    ↓
-push_branch → create_issue → create_mr → human_approval
-    ↓
-add_to_merge_train → report_summary
+run_pytest  ──┘                                              ↓
+                push_branch → create_issue → create_mr → human_approval
+                                                              ↓
+                              add_to_merge_train → report_summary
+                                        ↓
+                               [recovery subgraph on failure]
 ```
 
-Key features:
-- **Parallel testing** - Molecule and pytest run simultaneously
-- **HITL gate** - Human approval before merge train
-- **Retry policies** - Exponential backoff for GitLab API calls
-- **Checkpointing** - Resume from any node
+17 nodes: `validate_role`, `analyze_deps`, `check_reverse_deps`, `create_worktree`, `run_molecule`, `run_pytest`, `merge_test_results`, `validate_deploy`, `create_commit`, `push_branch`, `create_issue`, `create_mr`, `human_approval`, `add_to_merge_train`, `report_summary`, `notify_failure`, `recovery`
 
-## MCP Integration
+## MCP Tools
 
-40+ tools across 8 categories for Claude Code:
+30 tools defined in `harness/mcp/server.py`:
 
-| Category | Tools | Purpose |
-|----------|-------|---------|
-| role_management | 7 | List, status, dependencies |
-| workflow | 5 | Execution status, HOTL control |
-| worktree | 3 | Git worktree management |
-| testing | 2 | Test history, regressions |
-| agent | 6 | Subagent coordination |
-| costs | 3 | Token usage tracking |
-| credentials | 1 | Credential discovery |
-| search | 2 | Tool search and discovery |
-
-## Directory Structure
-
-```
-dag-harness/
-├── harness/                    # Python package
-│   ├── harness/
-│   │   ├── cli.py              # Typer CLI
-│   │   ├── dag/                # LangGraph workflow
-│   │   ├── db/                 # SQLite state
-│   │   ├── mcp/                # MCP server
-│   │   ├── hotl/               # Autonomous operation
-│   │   ├── costs/              # Cost tracking
-│   │   └── bootstrap/          # Self-installation
-│   └── tests/                  # 900+ tests
-├── docs/                       # Documentation
-│   ├── llms.txt                # LLM-friendly reference
-│   └── llms.md                 # Detailed LLM docs
-└── .gitlab-ci.yml              # CI/CD pipeline
-```
+| Category | Count |
+|----------|-------|
+| role_management | 7 |
+| workflow | 5 |
+| agent | 6 |
+| worktree | 3 |
+| costs | 3 |
+| testing | 2 |
+| search | 2 |
+| credentials | 1 |
+| merge_train | 1 |
 
 ## Configuration
 
-Create `harness.yml`:
-
 ```yaml
-db_path: harness/harness.db
+# harness.yml
+db_path: harness.db
 repo_root: /path/to/ansible/roles
 
 gitlab:
@@ -142,34 +75,31 @@ gitlab:
 
 worktree:
   base_path: /path/to/worktrees
-  branch_prefix: sid/
-
-waves:
-  0: { name: Foundation, roles: [common] }
-  1: { name: Infrastructure, roles: [...] }
+  branch_prefix: feature/
 ```
 
 ## Requirements
 
 - Python 3.11+
-- [uv](https://astral.sh/uv/) package manager
 - Git with worktree support
-- GitLab API access (GITLAB_TOKEN)
+- GitLab API access (`GITLAB_TOKEN`)
+
+## Tests
+
+```bash
+cd harness
+uv run pytest                           # 1667 tests
+uv run pytest -m "not integration"      # Unit tests only
+uv run pytest -m pbt                    # Property-based tests
+```
 
 ## Documentation
 
-- **[Getting Started](docs/getting-started.md)** - Installation and first steps
-- **[Architecture](docs/architecture.md)** - System design
-- **[CLI Reference](docs/api/cli.md)** - All commands
-- **[MCP Tools](docs/api/mcp-tools.md)** - Tool reference
-- **[LLM Docs](docs/llms.md)** - For AI assistants
-
-## Author
-
-**Jess Sullivan** — [xoxd.ai](https://xoxd.ai)
-
-Developed by [Tinyland.dev, Inc.](https://tinyland.dev)
+- [Architecture](docs/architecture.md)
+- [CLI Reference](docs/api/cli.md)
+- [MCP Tools](docs/api/mcp-tools.md)
+- [LLM Context](docs/llms.md)
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT
