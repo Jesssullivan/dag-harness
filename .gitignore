@@ -3,11 +3,12 @@
 # =============================================================================
 
 # =============================================================================
-# AI/LLM Tool Artifacts - NEVER COMMIT
+# AI/LLM Tool Artifacts - Local Only
 # =============================================================================
 CLAUDE*
 !CLAUDE.md
 .claude/
+.claudeignore
 .mcp.json
 .mcp/
 .steering/
@@ -166,3 +167,9 @@ site/
 # =============================================================================
 # Local environment overrides
 .envrc
+
+# Local git hooks (not shared upstream)
+.githooks/
+
+# Internal planning docs
+PLAN.md

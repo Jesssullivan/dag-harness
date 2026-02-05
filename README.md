@@ -12,31 +12,20 @@ Self-installing DAG orchestration for Ansible role deployments using LangGraph.
 
 ## Installation
 
-### Quick Install (Recommended)
+### Install via uv (Recommended)
 
 ```bash
-# One-line bootstrap
-curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/scripts/bootstrap.sh | bash
-```
+# From GitHub (latest main)
+uv pip install git+https://github.com/Jesssullivan/dag-harness.git#subdirectory=harness
 
-### Install via uv
-
-```bash
-# From GitHub (specific version)
-uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
-
-# From GitHub (latest)
-uv tool install git+https://github.com/Jesssullivan/dag-harness.git
+# With extras
+uv pip install "dag-harness[dev] @ git+https://github.com/Jesssullivan/dag-harness.git#subdirectory=harness"
 ```
 
 ### Install via pip
 
 ```bash
-# From GitHub
-pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
-
-# Direct wheel (fastest)
-pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+pip install git+https://github.com/Jesssullivan/dag-harness.git#subdirectory=harness
 ```
 
 ### Install from Source
