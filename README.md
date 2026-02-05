@@ -10,22 +10,51 @@ Self-installing DAG orchestration for Ansible role deployments using LangGraph.
 - **Cost Tracking** - Per-session token usage and cost reporting
 - **Self-Installing** - One command bootstrap with MCP client setup
 
+## Installation
+
+### Quick Install (Recommended)
+
+```bash
+# One-line bootstrap
+curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/scripts/bootstrap.sh | bash
+```
+
+### Install via uv
+
+```bash
+# From GitHub (specific version)
+uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+# From GitHub (latest)
+uv tool install git+https://github.com/Jesssullivan/dag-harness.git
+```
+
+### Install via pip
+
+```bash
+# From GitHub
+pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+# Direct wheel (fastest)
+pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+```
+
+### Install from Source
+
+```bash
+git clone https://github.com/Jesssullivan/dag-harness.git
+cd dag-harness/harness
+uv sync  # or: pip install -e .
+```
+
 ## Quick Start
 
 ```bash
-# Clone and install (GitHub)
-git clone https://github.com/Jesssullivan/dag-harness.git
-cd dag-harness/harness
-uv sync
-
-# Or from GitLab
-# git clone https://gitlab.com/tinyland/projects/dag-harness.git
-
 # Bootstrap (interactive setup)
-uv run harness bootstrap
+harness bootstrap
 
 # Verify installation
-uv run harness bootstrap --check-only
+harness bootstrap --check-only
 ```
 
 ## CLI Commands

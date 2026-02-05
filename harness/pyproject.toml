@@ -110,6 +110,10 @@ path = "harness/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["harness"]
+# Include all package data files (hooks, skills, settings)
+artifacts = [
+    "harness/assets/**/*",
+]
 
 [tool.hatch.build.targets.wheel.force-include]
 # Include SQL schemas for database initialization

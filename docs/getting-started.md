@@ -9,19 +9,21 @@ This guide walks you through installing and configuring the DAG Harness.
 - [uv](https://github.com/astral-sh/uv) package manager (recommended) or pip
 - GitLab account with API token (for MR creation)
 
-## Quick Install (curl-to-shell)
+## Installation Methods
+
+### Method 1: curl-to-shell Bootstrap (Recommended)
 
 Bootstrap the harness in any repository with a single command:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Jesssullivan/Ansible-DAG-Harness/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/scripts/bootstrap.sh | bash
 ```
 
 This will:
 
 1. Detect your platform (macOS, Linux, Rocky Linux)
 2. Find Python 3.11+ and uv/pip
-3. Install the `dag-harness` package
+3. Install the `dag-harness` package from GitHub
 4. Discover existing credentials (GITLAB_TOKEN, etc.)
 5. Run self-tests
 
@@ -31,27 +33,44 @@ After the script completes, run the full interactive setup:
 harness bootstrap
 ```
 
-## Manual Installation
+### Method 2: Install via uv (from GitHub)
 
-### 1. Clone the Repository
+Install directly from GitHub using git+https:
 
 ```bash
-git clone https://github.com/Jesssullivan/Ansible-DAG-Harness.git
-cd Ansible-DAG-Harness
+# Install specific version
+uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+# Install latest from main branch
+uv tool install git+https://github.com/Jesssullivan/dag-harness.git
 ```
 
-### 2. Install Dependencies
+### Method 3: Install via pip (from GitHub)
 
 ```bash
-cd harness
-uv sync
-cd ..
+# Install specific version
+pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+# Install latest from main branch
+pip install git+https://github.com/Jesssullivan/dag-harness.git
 ```
 
-Or install as a tool:
+### Method 4: Direct Wheel URL (Fastest)
+
+Download and install the wheel directly from a GitHub release:
 
 ```bash
-uv tool install ./harness
+pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+```
+
+### Method 5: Clone and Install Locally
+
+For development or contributing:
+
+```bash
+git clone https://github.com/Jesssullivan/dag-harness.git
+cd dag-harness/harness
+uv sync  # or: pip install -e .
 ```
 
 ### 3. Bootstrap the Harness

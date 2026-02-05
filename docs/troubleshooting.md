@@ -9,7 +9,20 @@ Common issues and their solutions.
 **Cause:** Package not installed or wrong Python environment.
 
 **Solution:**
+
+Try one of these installation methods:
+
 ```bash
+# Option 1: Install via uv from GitHub
+uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+# Option 2: Install via pip from GitHub
+pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+# Option 3: Direct wheel installation
+pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+
+# Option 4: From source
 cd harness
 uv sync
 uv run harness --version
@@ -22,6 +35,70 @@ uv run harness --version
 **Solution:**
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### "git: command not found" (during pip install from GitHub)
+
+**Cause:** Git is required for `git+https://` installations.
+
+**Solution:**
+```bash
+# macOS
+brew install git
+
+# Ubuntu/Debian
+sudo apt-get install git
+
+# Or use direct wheel URL instead (no git required)
+pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+```
+
+### "Could not find a version that satisfies the requirement"
+
+**Cause:** PyPI package doesn't exist (dag-harness is installed from GitHub).
+
+**Solution:**
+```bash
+# Install from GitHub, not PyPI
+pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+# Or use the bootstrap script
+curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/scripts/bootstrap.sh | bash
+```
+
+### "Permission denied" during installation
+
+**Cause:** Installing to system Python without privileges.
+
+**Solution:**
+```bash
+# Option 1: Use --user flag
+pip install --user git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+# Option 2: Use uv tool (installs to user space)
+uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+# Option 3: Use virtual environment
+python -m venv .venv
+source .venv/bin/activate
+pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+```
+
+### "harness: command not found" after installation
+
+**Cause:** Installation directory not in PATH.
+
+**Solution:**
+```bash
+# Check where it was installed
+pip show dag-harness | grep Location
+
+# For uv tool installs, add to PATH
+export PATH="$HOME/.local/bin:$PATH"
+
+# Add to shell profile (.bashrc, .zshrc)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 ## Bootstrap Issues
@@ -289,6 +366,7 @@ harness hotl cancel_executions  # Start fresh
 
 ## Getting Help
 
-- **Docs:** https://tinyland.gitlab.io/projects/dag-harness/
-- **Issues:** https://gitlab.com/tinyland/projects/dag-harness/-/issues
+- **Docs:** https://disposable-ansible-dag.ephemera.xoxd.ai
+- **GitHub Issues:** https://github.com/Jesssullivan/dag-harness/issues
+- **GitLab Issues:** https://gitlab.com/tinyland/projects/dag-harness/-/issues
 - **LLM Docs:** See `docs/llms.md` for AI assistant reference

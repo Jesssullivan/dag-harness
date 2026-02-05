@@ -21,6 +21,54 @@ human-on-the-loop autonomous operation, and wave-based parallel execution.
 - **GitLab integration** -- Idempotent issue/MR creation, merge train
   management, and iteration tracking
 
+## Installation
+
+=== "Quick Install"
+
+    ```bash
+    curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/scripts/bootstrap.sh | bash
+    ```
+
+=== "uv"
+
+    ```bash
+    # From GitHub (specific version)
+    uv tool install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+    # From GitHub (latest)
+    uv tool install git+https://github.com/Jesssullivan/dag-harness.git
+    ```
+
+=== "pip"
+
+    ```bash
+    # From GitHub
+    pip install git+https://github.com/Jesssullivan/dag-harness.git@v0.2.0
+
+    # Direct wheel (fastest)
+    pip install https://github.com/Jesssullivan/dag-harness/releases/download/v0.2.0/dag_harness-0.2.0-py3-none-any.whl
+    ```
+
+=== "From Source"
+
+    ```bash
+    git clone https://github.com/Jesssullivan/dag-harness.git
+    cd dag-harness/harness
+    uv sync  # or: pip install -e .
+    ```
+
+See [Getting Started](getting-started.md) for detailed installation instructions.
+
+## Quick Start
+
+```bash
+# Bootstrap (interactive setup)
+harness bootstrap
+
+# Verify installation
+harness bootstrap --check-only
+```
+
 ## Documentation
 
 | Guide | Description |

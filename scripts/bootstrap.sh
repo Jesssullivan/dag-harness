@@ -1,11 +1,11 @@
 #!/bin/bash
 # dag-harness bootstrap script
-# Usage: curl -sSL https://raw.githubusercontent.com/Jesssullivan/Ansible-DAG-Harness/main/scripts/bootstrap.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/Jesssullivan/dag-harness/main/scripts/bootstrap.sh | bash
 # Or:    curl -sSL https://disposable-ansible-dag.ephemera.xoxd.ai/scripts/bootstrap.sh | bash
 #
 # This script:
 # 1. Detects platform (darwin-arm64, darwin-x86_64, rocky-x86_64, linux-x86_64)
-# 2. Selects installation method (uv → pip → binary fallback)
+# 2. Selects installation method (git+https → wheel URL → binary fallback)
 # 3. Performs greedy credential discovery
 # 4. Runs self-tests to verify installation
 
@@ -21,8 +21,9 @@ NC='\033[0m' # No Color
 
 # Configuration
 PACKAGE_NAME="dag-harness"
+VERSION="0.2.0"
 MIN_PYTHON_VERSION="3.11"
-GITHUB_REPO="Jesssullivan/Ansible-DAG-Harness"
+GITHUB_REPO="Jesssullivan/dag-harness"
 GITLAB_REPO="tinyland/projects/dag-harness"
 GITHUB_RELEASES_URL="https://github.com/${GITHUB_REPO}/releases"
 DOCS_URL="https://disposable-ansible-dag.ephemera.xoxd.ai"
@@ -145,12 +146,20 @@ check_prerequisites() {
     return 0
 }
 
-# Install via uv (preferred)
-install_via_uv() {
-    log_step "Installing via uv tool..."
+# Install via uv from GitHub (preferred)
+install_via_uv_github() {
+    log_step "Installing via uv from GitHub..."
+    local git_url="git+https://github.com/${GITHUB_REPO}.git@v${VERSION}"
 
-    if uv tool install "$PACKAGE_NAME" 2>/dev/null; then
-        log_success "Installed $PACKAGE_NAME via uv tool"
+    if uv tool install "$git_url" 2>/dev/null; then
+        log_success "Installed $PACKAGE_NAME via uv from GitHub"
+        return 0
+    fi
+
+    # Try without version tag (latest main)
+    git_url="git+https://github.com/${GITHUB_REPO}.git"
+    if uv tool install "$git_url" 2>/dev/null; then
+        log_success "Installed $PACKAGE_NAME via uv from GitHub (main branch)"
         return 0
     fi
 
@@ -166,13 +175,21 @@ install_via_uv() {
     return 1
 }
 
-# Install via pip
-install_via_pip() {
-    log_step "Installing via pip..."
+# Install via pip from GitHub
+install_via_pip_github() {
+    log_step "Installing via pip from GitHub..."
     local pip_cmd="${HARNESS_PYTHON:-python3} -m pip"
+    local git_url="git+https://github.com/${GITHUB_REPO}.git@v${VERSION}"
 
-    if $pip_cmd install --user "$PACKAGE_NAME" 2>/dev/null; then
-        log_success "Installed $PACKAGE_NAME via pip"
+    if $pip_cmd install --user "$git_url" 2>/dev/null; then
+        log_success "Installed $PACKAGE_NAME via pip from GitHub"
+        return 0
+    fi
+
+    # Try without version tag (latest main)
+    git_url="git+https://github.com/${GITHUB_REPO}.git"
+    if $pip_cmd install --user "$git_url" 2>/dev/null; then
+        log_success "Installed $PACKAGE_NAME via pip from GitHub (main branch)"
         return 0
     fi
 
@@ -183,6 +200,25 @@ install_via_pip() {
             log_success "Installed $PACKAGE_NAME from local source"
             return 0
         fi
+    fi
+
+    return 1
+}
+
+# Install via direct wheel URL (if GitHub release exists)
+install_via_wheel_url() {
+    log_step "Attempting wheel download from GitHub release..."
+    local pip_cmd="${HARNESS_PYTHON:-python3} -m pip"
+    local wheel_url="${GITHUB_RELEASES_URL}/download/v${VERSION}/dag_harness-${VERSION}-py3-none-any.whl"
+
+    # Check if wheel exists
+    if curl -fsS --head "$wheel_url" >/dev/null 2>&1; then
+        if $pip_cmd install --user "$wheel_url" 2>/dev/null; then
+            log_success "Installed $PACKAGE_NAME from GitHub release wheel"
+            return 0
+        fi
+    else
+        log_info "No wheel found at release URL, skipping..."
     fi
 
     return 1
@@ -218,30 +254,39 @@ install_via_binary() {
 # Select and execute installation strategy
 install_harness() {
     local platform="$1"
-    log_step "Installing dag-harness..."
+    log_step "Installing dag-harness v${VERSION}..."
 
-    # Strategy 1: uv (preferred)
+    # Strategy 1: uv from git+https (preferred - always works, builds from source)
     if [ "${HARNESS_INSTALLER:-}" = "uv" ]; then
-        if install_via_uv; then
+        if install_via_uv_github; then
             return 0
         fi
         log_warn "uv installation failed, trying pip..."
     fi
 
-    # Strategy 2: pip
+    # Strategy 2: pip from git+https
     if [ -n "${HARNESS_PYTHON:-}" ]; then
-        if install_via_pip; then
+        if install_via_pip_github; then
             return 0
         fi
-        log_warn "pip installation failed, trying binary..."
+        log_warn "pip from GitHub failed, trying wheel URL..."
     fi
 
-    # Strategy 3: Binary fallback
+    # Strategy 3: Direct wheel URL (faster if release exists)
+    if [ -n "${HARNESS_PYTHON:-}" ]; then
+        if install_via_wheel_url; then
+            return 0
+        fi
+        log_warn "Wheel download failed, trying binary..."
+    fi
+
+    # Strategy 4: Binary fallback (platform-specific pre-built binary)
     if install_via_binary "$platform"; then
         return 0
     fi
 
     log_error "All installation methods failed"
+    log_info "Try manual installation: pip install git+https://github.com/${GITHUB_REPO}.git"
     return 1
 }
 
@@ -359,7 +404,7 @@ run_harness_init() {
 show_instructions() {
     echo ""
     echo -e "${GREEN}============================================${NC}"
-    echo -e "${GREEN} dag-harness installed successfully!${NC}"
+    echo -e "${GREEN} dag-harness v${VERSION} installed successfully!${NC}"
     echo -e "${GREEN}============================================${NC}"
     echo ""
     echo "Next steps:"
@@ -367,6 +412,13 @@ show_instructions() {
     echo "  2. Initialize a project:   cd /path/to/repo && harness init"
     echo "  3. Configure credentials:  harness credentials --prompt"
     echo "  4. Check system status:    harness check"
+    echo ""
+    echo "Alternative installation methods:"
+    echo "  # Via git+https (build from source)"
+    echo "  uv tool install git+https://github.com/${GITHUB_REPO}.git@v${VERSION}"
+    echo ""
+    echo "  # Via wheel URL (faster)"
+    echo "  pip install ${GITHUB_RELEASES_URL}/download/v${VERSION}/dag_harness-${VERSION}-py3-none-any.whl"
     echo ""
     echo "Documentation: ${DOCS_URL}"
     echo "GitHub:        https://github.com/${GITHUB_REPO}"

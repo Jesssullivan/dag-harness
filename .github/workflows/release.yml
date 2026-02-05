@@ -61,6 +61,35 @@ jobs:
             echo "::warning::Version mismatch: pyproject.toml ($PYPROJECT_VERSION) vs release (${{ steps.version.outputs.version }})"
           fi
 
+  # Build wheel
+  build-wheel:
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build wheel
+        run: |
+          cd harness
+          python -m build --wheel
+          ls -la dist/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: harness/dist/*.whl
+
   # Build binaries
   build-binaries:
     if: ${{ !inputs.skip_binaries }}
@@ -70,10 +99,10 @@ jobs:
       version: ${{ needs.prepare.outputs.version_tag }}
     secrets: inherit
 
-  # Publish to PyPI
+  # Publish to PyPI (optional - skip if no PyPI credentials)
   publish-pypi:
     if: ${{ !inputs.skip_pypi }}
-    needs: prepare
+    needs: [prepare, build-wheel]
     uses: ./.github/workflows/publish-pypi.yml
     with:
       test_pypi: false
@@ -81,8 +110,8 @@ jobs:
 
   # Create GitHub Release
   create-release:
-    needs: [prepare, build-binaries, publish-pypi]
-    if: always() && needs.prepare.result == 'success'
+    needs: [prepare, build-wheel, build-binaries, publish-pypi]
+    if: always() && needs.prepare.result == 'success' && needs.build-wheel.result == 'success'
     runs-on: ubuntu-latest
 
     permissions:
@@ -92,8 +121,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download binary artifacts
-        if: needs.build-binaries.result == 'success'
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -101,6 +129,12 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
+
+          # Copy wheel (primary artifact for pip/uv installation)
+          if [ -d "artifacts/wheel" ]; then
+            cp artifacts/wheel/*.whl release-assets/
+            echo "Wheel added to release assets"
+          fi
 
           # Copy binaries if available
           if [ -d "artifacts" ]; then
@@ -131,26 +165,32 @@ jobs:
           curl -sSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/bootstrap.sh | bash
           ```
 
-          **Via uv:**
+          **Via uv (from GitHub):**
           ```bash
-          uv tool install dag-harness
+          uv tool install git+https://github.com/${{ github.repository }}.git@${{ needs.prepare.outputs.version_tag }}
           ```
 
-          **Via pip:**
+          **Via pip (from GitHub):**
           ```bash
-          pip install dag-harness
+          pip install git+https://github.com/${{ github.repository }}.git@${{ needs.prepare.outputs.version_tag }}
+          ```
+
+          **Via direct wheel URL (fastest):**
+          ```bash
+          pip install https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.version_tag }}/dag_harness-${{ needs.prepare.outputs.version }}-py3-none-any.whl
           ```
 
           **Via binary download:**
           Download the appropriate binary for your platform from the assets below.
 
-          ### Platform Binaries
+          ### Release Assets
 
-          | Platform | Binary |
-          |----------|--------|
-          | macOS Apple Silicon | `harness-darwin-arm64` |
-          | macOS Intel | `harness-darwin-x86_64` |
-          | Linux x86_64 | `harness-linux-x86_64` |
+          | Asset | Description |
+          |-------|-------------|
+          | `dag_harness-${{ needs.prepare.outputs.version }}-py3-none-any.whl` | Python wheel (universal) |
+          | `harness-darwin-arm64` | macOS Apple Silicon binary |
+          | `harness-darwin-x86_64` | macOS Intel binary |
+          | `harness-linux-x86_64` | Linux x86_64 binary |
 
           ### Verification
 
